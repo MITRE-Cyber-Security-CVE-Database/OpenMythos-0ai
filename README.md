@@ -1,7 +1,73 @@
 # OpenMythos
 
-A theoretical reconstruction of the Claude Mythos architecture, built from first principles using the available research literature.
+An open-source and theoretically grounded reconstruction of the Claude Mythos architecture, built from first principles using the available research literature.
 
+
+## Usage
+
+```python
+
+import torch
+from open_mythos.main import OpenMythos, MythosConfig
+
+
+attn_type = "mla"  # or "gqa"
+
+base = {
+    "vocab_size": 1000,
+    "dim": 256,
+    "n_heads": 8,
+    "max_seq_len": 128,
+    "max_loop_iters": 4,
+    "prelude_layers": 1,
+    "coda_layers": 1,
+    "n_experts": 8,
+    "n_shared_experts": 1,
+    "n_experts_per_tok": 2,
+    "expert_dim": 64,
+    "lora_rank": 8,
+    "attn_type": attn_type,
+}
+
+if attn_type == "gqa":
+    cfg = MythosConfig(**base, n_kv_heads=2)
+else:
+    cfg = MythosConfig(
+        **base,
+        n_kv_heads=8,
+        kv_lora_rank=32,
+        q_lora_rank=64,
+        qk_rope_head_dim=16,
+        qk_nope_head_dim=16,
+        v_head_dim=16,
+    )
+
+model = OpenMythos(cfg)
+total = sum(p.numel() for p in model.parameters())
+print(f"\n[{attn_type.upper()}] Parameters: {total:,}")
+
+ids = torch.randint(0, cfg.vocab_size, (2, 16))
+logits = model(ids, n_loops=4)
+print(f"[{attn_type.upper()}] Logits shape: {logits.shape}")
+
+out = model.generate(ids, max_new_tokens=8, n_loops=8)
+print(f"[{attn_type.upper()}] Generated shape: {out.shape}")
+
+A = model.recurrent.injection.get_A()
+print(
+    f"[{attn_type.upper()}] Spectral radius ρ(A) max: {A.max().item():.4f} (must be < 1)"
+)
+```
+
+
+
+## Documentation
+
+| Page | Description |
+|---|---|
+| [`docs/open_mythos.md`](docs/open_mythos.md) | Full API reference for the `OpenMythos` class — constructor, `forward`, `generate`, all sub-modules, configuration reference, and usage examples |
+
+---
 
 ## The Central Hypothesis
 
@@ -41,6 +107,8 @@ Where:
 - The Transformer blocks apply attention and MLP as usual
 
 The injection of `e` at every step is what prevents the model from drifting — it keeps the original input signal alive throughout the entire recurrence depth.
+
+The full implementation is in [`open_mythos/main.py`](open_mythos/main.py). See the [`OpenMythos` class reference](docs/open_mythos.md) for a detailed API walkthrough, configuration options, and usage examples.
 
 ---
 
@@ -222,3 +290,25 @@ Theoretical analysis suggests 2-3x improvements in inference throughput. For a d
 - Reasoning with Latent Thoughts — On the Power of Looped Transformers: https://arxiv.org/abs/2502.17416
 - Training Large Language Models to Reason in a Continuous Latent Space: https://arxiv.org/abs/2412.06769
 - Relaxed Recursive Transformers — Effective Parameter Sharing with Layer-wise LoRA: https://arxiv.org/pdf/2410.20672
+
+---
+
+## Citation
+
+If you use OpenMythos in your research or build on this work, please cite:
+
+```bibtex
+@software{gomez2026openmythos,
+  author    = {Kye Gomez},
+  title     = {OpenMythos: A Theoretical Reconstruction of the Claude Mythos Architecture},
+  year      = {2026},
+  url       = {https://github.com/kyegomez/OpenMythos},
+  note      = {Recurrent-Depth Transformer with MoE, MLA, LTI-stable injection, and ACT halting}
+}
+```
+
+---
+
+## License
+
+MIT License — Copyright (c) 2026 Kye Gomez. See [`LICENSE`](LICENSE) for the full text.
