@@ -1,5 +1,32 @@
 # OpenMythos
 
+<p align="left">
+  <a href="https://pypi.org/project/open-mythos/" target="_blank">
+    <picture>
+      <source srcset="https://img.shields.io/pypi/v/open-mythos?style=for-the-badge&color=3670A0" media="(prefers-color-scheme: dark)">
+      <img alt="Version" src="https://img.shields.io/pypi/v/open-mythos?style=for-the-badge&color=3670A0">
+    </picture>
+  </a>
+  <a href="https://twitter.com/kyegomezb/">
+    <picture>
+      <source srcset="https://img.shields.io/badge/Twitter-Follow-1DA1F2?style=for-the-badge&logo=twitter&logoColor=white" media="(prefers-color-scheme: dark)">
+      <img src="https://img.shields.io/badge/Twitter-Follow-1DA1F2?style=for-the-badge&logo=twitter&logoColor=white" alt="Twitter">
+    </picture>
+  </a>
+  <a href="https://discord.gg/3keGBK9Pvr" target="_blank">
+    <picture>
+      <source srcset="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white" media="(prefers-color-scheme: dark)">
+      <img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white">
+    </picture>
+  </a>
+  <a href="https://pytorch.org" target="_blank">
+    <picture>
+      <source srcset="https://img.shields.io/badge/PyTorch-Implemented-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white" media="(prefers-color-scheme: dark)">
+      <img alt="PyTorch" src="https://img.shields.io/badge/PyTorch-Implemented-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white">
+    </picture>
+  </a>
+</p>
+
 > **Disclaimer:** OpenMythos is an independent, community-driven theoretical reconstruction based solely on publicly available research and speculation. It is not affiliated with, endorsed by, or connected to Anthropic or any of their proprietary systems.
 
 OpenMythos is an open-source, theoretical implementation of the Claude Mythos model. It implements a Recurrent-Depth Transformer (RDT) with three stages: **Prelude** (transformer blocks), a looped **Recurrent Block** (up to `max_loop_iters`), and a final **Coda**. Attention is switchable between MLA and GQA, and the feed-forward uses a sparse MoE with routed and shared experts ideal for exploring compute-adaptive, depth-variable reasoning.
@@ -8,9 +35,15 @@ OpenMythos is an open-source, theoretical implementation of the Claude Mythos mo
 ## Installation
 
 ```bash
-git clone https://github.com/The-Swarm-Corporation/OpenMythos.git
-cd OpenMythos
-pip install -r requirements.txt
+pip install open-mythos
+
+#uv pip install open-mythos
+```
+
+To enable Flash Attention 2 in `GQAttention` (requires CUDA and build tools):
+
+```bash
+pip install open-mythos[flash]
 ```
 
 ## Usage
@@ -64,18 +97,83 @@ out = model.generate(ids, max_new_tokens=8, n_loops=8)
 print(f"[{attn_type.upper()}] Generated shape: {out.shape}")
 
 A = model.recurrent.injection.get_A()
+rho = torch.linalg.eigvals(A).abs().max().item()
 print(
-    f"[{attn_type.upper()}] Spectral radius ρ(A) max: {A.max().item():.4f} (must be < 1)"
+    f"[{attn_type.upper()}] Spectral radius ρ(A) = {rho:.4f} (must be < 1)"
 )
 ```
 
 
+
+## Model Variants
+
+Pre-configured scales from 1B to 1T parameters:
+
+```python
+from open_mythos import (
+    mythos_1b,
+    mythos_3b,
+    mythos_10b,
+    mythos_50b,
+    mythos_100b,
+    mythos_500b,
+    mythos_1t,
+    OpenMythos,
+)
+
+cfg = mythos_7b()  # returns a MythosConfig
+model = OpenMythos(cfg)
+
+total = sum(p.numel() for p in model.parameters())
+print(f"Parameters: {total:,}")
+```
+
+| Variant | `dim` | Experts | `expert_dim` | Loop iters | Context | Max output |
+|---|---|---|---|---|---|---|
+| `mythos_1b` | 2048 | 64 | 2048 | 16 | 4k | 4k |
+| `mythos_3b` | 3072 | 64 | 4096 | 16 | 4k | 4k |
+| `mythos_10b` | 4096 | 128 | 5632 | 24 | 8k | 4k |
+| `mythos_50b` | 6144 | 256 | 9728 | 32 | 8k | 4k |
+| `mythos_100b` | 8192 | 256 | 13568 | 32 | 1M | 128k |
+| `mythos_500b` | 12288 | 512 | 23040 | 48 | 1M | 128k |
+| `mythos_1t` | 16384 | 512 | 34560 | 64 | 1M | 128k |
+
+---
+
+## Training
+
+The training script for the 3B model on FineWeb-Edu is at [`training/3b_fine_web_edu.py`](training/3b_fine_web_edu.py).
+
+**Single GPU:**
+```bash
+python training/3b_fine_web_edu.py
+```
+
+**Multi-GPU (auto-detects GPU count):**
+```bash
+torchrun --nproc_per_node=$(python -c "import torch; print(torch.cuda.device_count())") training/3b_fine_web_edu.py
+```
+
+Key design choices:
+
+| Feature | Detail |
+|---|---|
+| Optimizer | AdamW |
+| Dataset | `HuggingFaceFW/fineweb-edu` (`sample-10BT` by default, swap to `sample-100BT` or `default` for full run) |
+| Tokenizer | `openai/gpt-oss-20b` via `MythosTokenizer` |
+| Parallelism | PyTorch DDP via `torchrun`, sharded streaming dataset |
+| Precision | bfloat16 on H100/A100, float16 + GradScaler on older GPUs |
+| Schedule | Linear warmup (2000 steps) → cosine decay |
+| Target | 30B tokens (~Chinchilla-adjusted for looped architecture) |
+
+---
 
 ## Documentation
 
 | Page | Description |
 |---|---|
 | [`docs/open_mythos.md`](docs/open_mythos.md) | Full API reference for the `OpenMythos` class — constructor, `forward`, `generate`, all sub-modules, configuration reference, and usage examples |
+| [`docs/datasets.md`](docs/datasets.md) | Recommended training datasets with token budget guidance per model size |
 
 ---
 
@@ -119,6 +217,17 @@ Where:
 The injection of `e` at every step is what prevents the model from drifting — it keeps the original input signal alive throughout the entire recurrence depth.
 
 The full implementation is in [`open_mythos/main.py`](open_mythos/main.py). See the [`OpenMythos` class reference](docs/open_mythos.md) for a detailed API walkthrough, configuration options, and usage examples.
+
+### Attention Implementations
+
+The attention layer is switchable via `cfg.attn_type`:
+
+| Option | Class | Description |
+|---|---|---|
+| `"gqa"` | `GQAttention` | Grouped Query Attention (Ainslie et al., 2023) — fewer KV heads than Q heads (`n_kv_heads < n_heads`), reducing KV-cache memory by `n_heads / n_kv_heads`. Uses **Flash Attention 2** (Dao et al., 2023) when `flash-attn>=2.8.3` is installed: GQA is handled natively (no KV head expansion), I/O-bound-optimal, with a transparent fallback to manual scaled dot-product attention when the package is absent. |
+| `"mla"` | `MLAttention` | Multi-Latent Attention (DeepSeek-V2) — caches a compressed KV latent (`kv_lora_rank`) rather than full K/V, with split RoPE / no-RoPE head dims for position-aware compression. |
+
+RoPE is applied to Q and K before caching, so cached values do not need to be re-rotated on retrieval.
 
 ---
 
@@ -274,6 +383,7 @@ Theoretical analysis suggests 2-3x improvements in inference throughput. For a d
 | Training stability | LTI-constrained injection parameters with spectral radius < 1 |
 | Loop differentiation | Likely uses loop-index positional embedding (à la RoPE) per iteration |
 | Halting | Adaptive Computation Time or learned convergence criterion |
+| Attention | GQA (with optional Flash Attention 2) or MLA with compressed KV latent cache |
 | Scaling law | Optimal training scales looping and data together, not parameters alone |
 | Reasoning vs. memory | Structurally biased toward composition; memorization requires separate treatment |
 | Deployment | Continuous Depth-wise Batching enables variable compute per request |
@@ -289,6 +399,9 @@ Theoretical analysis suggests 2-3x improvements in inference throughput. For a d
 - Looped transformer cyclic trajectories and input injection (rosinality): https://x.com/rosinality/status/2043953033428541853
 - Parcae scaling laws for stable looped language models — thread (Hayden Prairie): https://x.com/hayden_prairie/status/2044453231913537927
 - RoPE-like loop index embedding idea to differentiate functions across iterations (davidad): https://x.com/davidad/status/2044453231913537927
+- On the Looped Transformers Controversy by ChrisHayduk: https://x.com/ChrisHayduk/status/2045947623572688943
+- On the Looped Transformers Controversy Summary by @realsigridjin https://x.com/realsigridjin/status/2046012743778766875
+
 
 ### Papers
 
@@ -300,6 +413,7 @@ Theoretical analysis suggests 2-3x improvements in inference throughput. For a d
 - Reasoning with Latent Thoughts — On the Power of Looped Transformers: https://arxiv.org/abs/2502.17416
 - Training Large Language Models to Reason in a Continuous Latent Space: https://arxiv.org/abs/2412.06769
 - Relaxed Recursive Transformers — Effective Parameter Sharing with Layer-wise LoRA: https://arxiv.org/pdf/2410.20672
+- Mixture-of-Depths Attention: https://arxiv.org/abs/2603.15619
 
 ---
 

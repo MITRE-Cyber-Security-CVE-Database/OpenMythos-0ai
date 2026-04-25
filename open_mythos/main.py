@@ -1,9 +1,3 @@
-"""
-OpenMythos v1 — Recurrent-Depth Transformer
-Architecture: Prelude → [Looped Recurrent Block]×T → Coda
-MoE FFN (DeepSeek-style), GQA or MLA, RoPE, RMSNorm, KV cache, LTI-stable injection, ACT halting
-"""
-
 from dataclasses import dataclass
 from typing import Optional
 
@@ -11,9 +5,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+try:
+    from flash_attn import flash_attn_func
+
+    _HAS_FLASH_ATTN = True
+except ImportError:
+    _HAS_FLASH_ATTN = False
 
 
 @dataclass
@@ -78,6 +75,10 @@ class MythosConfig:
     rope_theta: float = 500000.0
     # LoRA depth adaptation
     lora_rank: int = 16
+    # Maximum tokens to generate per forward pass
+    max_output_tokens: int = 4096
+    # Dropout (set 0.0 to disable; 0.1 is standard for pretraining)
+    dropout: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -153,14 +154,19 @@ def apply_rope(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
     Args:
         x         -- tensor of shape (B, T, H, head_dim); head_dim must be even
-        freqs_cis -- precomputed complex frequencies of shape (max_len, head_dim//2)
+        freqs_cis -- precomputed complex frequencies of shape (T, head_dim//2),
+                     already sliced to exactly the positions being processed
+                     (caller is responsible for correct start_pos offset)
 
     Returns:
         Rotated tensor of the same shape and dtype as x
     """
     xc = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    freqs_cis = freqs_cis[: x.shape[1]].unsqueeze(0).unsqueeze(2)
-    return torch.view_as_real(xc * freqs_cis).flatten(-2).to(x.dtype)
+    return (
+        torch.view_as_real(xc * freqs_cis.unsqueeze(0).unsqueeze(2))
+        .flatten(-2)
+        .to(x.dtype)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -170,11 +176,16 @@ def apply_rope(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 class GQAttention(nn.Module):
     """
-    Grouped Query Attention (Ainslie et al., 2023).
+    Grouped Query Attention (Ainslie et al., 2023) with Flash Attention 2 (Dao et al., 2023).
 
     Uses fewer KV heads than Q heads (n_kv_heads < n_heads). Each KV head is
     shared across n_heads // n_kv_heads query heads, reducing the KV cache size
     by that factor while keeping full query expressiveness.
+
+    When flash-attn is installed, uses flash_attn_func which handles GQA natively
+    (no KV head expansion needed) and is IO-bound-optimal. Inputs are cast to
+    bfloat16 for flash_attn and restored to the original dtype afterward.
+    Falls back to manual scaled dot-product attention when flash-attn is absent.
 
     RoPE is applied to both Q and K. K and V are stored in kv_cache after
     RoPE application so that cached values are already positionally encoded and
@@ -196,6 +207,7 @@ class GQAttention(nn.Module):
         self.wk = nn.Linear(cfg.dim, cfg.n_kv_heads * self.head_dim, bias=False)
         self.wv = nn.Linear(cfg.dim, cfg.n_kv_heads * self.head_dim, bias=False)
         self.wo = nn.Linear(cfg.n_heads * self.head_dim, cfg.dim, bias=False)
+        self.dropout_p = cfg.dropout
 
     def forward(
         self,
@@ -230,21 +242,37 @@ class GQAttention(nn.Module):
                 v = torch.cat([kv_cache[cache_key]["v"], v], dim=1)
             kv_cache[cache_key] = {"k": k.detach(), "v": v.detach()}
 
-        # expand KV to match Q heads
-        k = k.repeat_interleave(self.groups, dim=2)
-        v = v.repeat_interleave(self.groups, dim=2)
+        if _HAS_FLASH_ATTN:
+            # flash_attn_func expects (B, T, H, head_dim) — GQA is handled natively
+            # (n_kv_heads < n_heads is supported without repeat_interleave).
+            # causal=True when mask is present (full-sequence prefill/training);
+            # causal=False for single-token decode where T=1 and mask is None.
+            orig_dtype = q.dtype
+            q = q.to(torch.bfloat16)
+            k = k.to(torch.bfloat16)
+            v = v.to(torch.bfloat16)
+            dropout_p = self.dropout_p if self.training else 0.0
+            out = flash_attn_func(
+                q, k, v, dropout_p=dropout_p, causal=(mask is not None)
+            )
+            out = out.to(orig_dtype).contiguous().view(B, T, -1)
+        else:
+            # Fallback: manual scaled dot-product with explicit KV head expansion.
+            k = k.repeat_interleave(self.groups, dim=2)
+            v = v.repeat_interleave(self.groups, dim=2)
+            q = q.transpose(1, 2)  # (B, H, T, head_dim)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            scale = self.head_dim**-0.5
+            attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+            if mask is not None:
+                attn = attn + mask
+            attn = F.dropout(
+                F.softmax(attn, dim=-1), p=self.dropout_p, training=self.training
+            )
+            out = torch.matmul(attn, v)
+            out = out.transpose(1, 2).contiguous().view(B, T, -1)
 
-        q = q.transpose(1, 2)  # (B, H, T, head_dim)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        scale = self.head_dim**-0.5
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
-        if mask is not None:
-            attn = attn + mask
-        attn = F.softmax(attn, dim=-1)
-        out = torch.matmul(attn, v)
-        out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
 
 
@@ -317,6 +345,7 @@ class MLAttention(nn.Module):
         )
 
         self.wo = nn.Linear(cfg.n_heads * cfg.v_head_dim, cfg.dim, bias=False)
+        self.attn_drop = nn.Dropout(cfg.dropout)
 
     def forward(
         self,
@@ -383,7 +412,7 @@ class MLAttention(nn.Module):
         attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         if mask is not None:
             attn = attn + mask
-        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_drop(F.softmax(attn, dim=-1))
         out = torch.matmul(attn, v)  # (B, H, T, v_dim)
         out = out.transpose(1, 2).contiguous().view(B, T, -1)
         return self.wo(out)
@@ -476,10 +505,14 @@ class MoEFFN(nn.Module):
         B, T, D = x.shape
         flat = x.view(B * T, D)
 
-        # router — bias shifts logits for load balancing without touching loss
-        logits = self.router(flat) + self.router_bias  # (B*T, n_experts)
+        # Aux-loss-free load balancing (DeepSeek-V3): the bias shifts only the
+        # selection of which experts fire so underused experts are picked more,
+        # but the gating weights come from unbiased softmax scores so the bias
+        # never shows up in the gradient.
+        logits = self.router(flat)  # (B*T, n_experts), unbiased
         scores = F.softmax(logits, dim=-1)
-        topk_scores, topk_idx = scores.topk(self.topk, dim=-1)
+        _, topk_idx = (logits + self.router_bias).topk(self.topk, dim=-1)
+        topk_scores = scores.gather(-1, topk_idx)
         topk_scores = topk_scores / topk_scores.sum(dim=-1, keepdim=True)  # renorm
 
         # routed expert dispatch (token-level scatter)
@@ -576,7 +609,12 @@ class LoRAAdapter(nn.Module):
         Returns:
             Delta tensor of shape (B, T, dim) to be added to the block output
         """
-        s = self.scale(torch.tensor(loop_t, device=x.device))  # (rank,)
+        # Clamp for depth extrapolation: at inference n_loops can exceed the
+        # training max_loop_iters. Iterations beyond the trained range reuse
+        # the last learned per-loop scale rather than indexing out of range.
+        max_t = self.scale.num_embeddings - 1
+        t_idx = loop_t if loop_t <= max_t else max_t
+        s = self.scale(torch.tensor(t_idx, device=x.device))  # (rank,)
         down = self.down(x) * s  # (B, T, rank)
         return down @ self.B  # (B, T, dim)
 
@@ -610,6 +648,7 @@ class TransformerBlock(nn.Module):
         self.ffn_norm = RMSNorm(cfg.dim)
         self.attn = MLAttention(cfg) if cfg.attn_type == "mla" else GQAttention(cfg)
         self.ffn = MoEFFN(cfg) if use_moe else Expert(cfg.dim, cfg.dim * 4 // 3)
+        self.resid_drop = nn.Dropout(cfg.dropout)
 
     def forward(
         self,
@@ -630,8 +669,10 @@ class TransformerBlock(nn.Module):
         Returns:
             Output tensor of shape (B, T, dim)
         """
-        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key)
-        x = x + self.ffn(self.ffn_norm(x))
+        x = x + self.resid_drop(
+            self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key)
+        )
+        x = x + self.resid_drop(self.ffn(self.ffn_norm(x)))
         return x
 
 
@@ -825,19 +866,26 @@ class RecurrentBlock(nn.Module):
             still_running = ~halted
 
             # ACT remainder trick: once cumulative_p + p crosses threshold,
-            # assign the remaining probability mass as the final weight
+            # assign the remaining probability mass as the final weight.
+            # Gate by still_running so halted positions contribute exactly
+            # once (on the halting step) and zero thereafter — otherwise
+            # threshold<1 leaves a non-zero remainder that leaks every step.
             remainder = (1.0 - cumulative_p).clamp(min=0)
             weight = torch.where(
                 cumulative_p + p >= self.cfg.act_threshold,
                 remainder,
                 p,
             )
+            weight = weight * still_running.float()
             h_out = h_out + weight.unsqueeze(-1) * h
 
             cumulative_p = cumulative_p + p * still_running.float()
             halted = halted | (cumulative_p >= self.cfg.act_threshold)
 
-            if halted.all():
+            # Only short-circuit when there is no KV cache to keep consistent.
+            # With a cache, every loop depth must run on every forward pass so
+            # later decode steps find populated keys at every cache_key.
+            if halted.all() and kv_cache is None:
                 break
 
         return h_out
@@ -918,18 +966,27 @@ class OpenMythos(nn.Module):
                 nn.init.normal_(m.weight, std=0.02)
 
     @staticmethod
-    def _causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
+    def _causal_mask(
+        seq_len: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         """
         Build an additive causal mask: 0 on and below the diagonal, -inf above.
 
         Args:
             seq_len -- sequence length
             device  -- target device
+            dtype   -- tensor dtype (must match activation dtype so the additive
+                       mask doesn't upcast the attention logits in the fallback
+                       attention path — e.g. bf16 weights with an fp32 mask
+                       promotes attn to fp32 and then breaks the fp32-vs-bf16
+                       matmul against V)
 
         Returns:
             Tensor of shape (1, 1, seq_len, seq_len) broadcastable over (B, H, T, S)
         """
-        mask = torch.full((1, 1, seq_len, seq_len), float("-inf"), device=device)
+        mask = torch.full(
+            (1, 1, seq_len, seq_len), float("-inf"), device=device, dtype=dtype
+        )
         return torch.triu(mask, diagonal=1)
 
     def forward(
@@ -937,6 +994,7 @@ class OpenMythos(nn.Module):
         input_ids: torch.Tensor,
         n_loops: Optional[int] = None,
         kv_cache: Optional[dict] = None,
+        start_pos: int = 0,
     ) -> torch.Tensor:
         """
         Forward pass through Prelude → Recurrent Block → Coda.
@@ -947,18 +1005,22 @@ class OpenMythos(nn.Module):
                          Increase at inference to extrapolate to harder problems.
             kv_cache  -- dict mutated in-place for autoregressive KV caching;
                          pass an empty dict {} and reuse across decode steps
+            start_pos -- index of the first token in input_ids within the full
+                         sequence; used to select the correct RoPE frequencies
+                         during incremental decoding (0 for prefill, prompt_len
+                         for each subsequent decode step)
 
         Returns:
             Logits of shape (B, T, vocab_size)
         """
-        B, T = input_ids.shape
+        T = input_ids.shape[1]
         device = input_ids.device
 
         x = self.embed(input_ids)
         freqs_cis = (
             self.freqs_cis_mla if self.cfg.attn_type == "mla" else self.freqs_cis
-        )[:T]
-        mask = self._causal_mask(T, device) if T > 1 else None
+        )[start_pos : start_pos + T]
+        mask = self._causal_mask(T, device, x.dtype) if T > 1 else None
 
         for i, layer in enumerate(self.prelude):
             x = layer(x, freqs_cis, mask, kv_cache, cache_key=f"prelude_{i}")
@@ -1002,9 +1064,17 @@ class OpenMythos(nn.Module):
             Token indices of shape (B, T + max_new_tokens)
         """
         kv_cache: dict = {}
+        prompt_len = input_ids.shape[1]
         for step in range(max_new_tokens):
-            cur_ids = input_ids if step == 0 else input_ids[:, -1:]
-            logits = self.forward(cur_ids, n_loops=n_loops, kv_cache=kv_cache)
+            if step == 0:
+                cur_ids = input_ids
+                start_pos = 0
+            else:
+                cur_ids = input_ids[:, -1:]
+                start_pos = prompt_len + step - 1
+            logits = self.forward(
+                cur_ids, n_loops=n_loops, kv_cache=kv_cache, start_pos=start_pos
+            )
             logits = logits[:, -1, :] / temperature
             if top_k > 0:
                 v, _ = logits.topk(top_k)
