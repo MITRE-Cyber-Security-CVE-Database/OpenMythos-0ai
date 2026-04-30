@@ -88,3 +88,20 @@ def test_header_diff_blocks_external_absolute_path():
     )
     assert result["ok"] is True
     assert result["blocked_path_count"] == 1
+
+
+def test_severity_normalization_known_values():
+    mod = load_mcp()
+    assert mod.normalize_severity("info")["score"] == 0
+    assert mod.normalize_severity("review")["score"] == 1
+    assert mod.normalize_severity("low")["score"] == 2
+    assert mod.normalize_severity("medium")["score"] == 3
+    assert mod.normalize_severity("high")["score"] == 4
+    assert mod.normalize_severity("critical")["score"] == 5
+
+
+def test_severity_normalization_unknown_defaults_to_review():
+    mod = load_mcp()
+    result = mod.normalize_severity("unexpected")
+    assert result["severity"] == "review"
+    assert result["score"] == 1

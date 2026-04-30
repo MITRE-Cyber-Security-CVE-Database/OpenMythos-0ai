@@ -901,6 +901,46 @@ def openmythos_http_route_discovery(
     return result
 
 
+SEVERITY_ORDER = {
+    "info": 0,
+    "review": 1,
+    "low": 2,
+    "medium": 3,
+    "high": 4,
+    "critical": 5,
+}
+
+
+def normalize_severity(value: str) -> Dict[str, Any]:
+    raw = str(value or "info").strip().lower()
+    if raw not in SEVERITY_ORDER:
+        raw = "review"
+
+    return {
+        "severity": raw,
+        "score": SEVERITY_ORDER[raw],
+        "label": raw.upper(),
+    }
+
+
+def normalize_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    normalized = []
+
+    for finding in findings:
+        item = dict(finding)
+        sev = normalize_severity(item.get("severity"))
+        item["severity"] = sev["severity"]
+        item["severity_score"] = sev["score"]
+        item["severity_label"] = sev["label"]
+        normalized.append(item)
+
+    normalized.sort(
+        key=lambda x: (x.get("severity_score", 0), str(x.get("header", ""))),
+        reverse=True,
+    )
+    return normalized
+
+
 @mcp.tool()
 def openmythos_http_security_headers(
     url: str = "http://127.0.0.1:3000",
@@ -990,7 +1030,11 @@ def openmythos_http_security_headers(
         "status": head.get("status"),
         "headers": headers_raw,
         "assessed_headers": present,
-        "findings": findings,
+        "findings": normalize_findings(findings),
+        "severity_summary": {
+            sev: sum(1 for item in normalize_findings(findings) if item.get("severity") == sev)
+            for sev in SEVERITY_ORDER
+        },
         "notes": [
             "passive HEAD request only",
             "localhost-only URL policy enforced",
