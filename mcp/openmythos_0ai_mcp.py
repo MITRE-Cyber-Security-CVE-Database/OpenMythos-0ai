@@ -901,5 +901,116 @@ def openmythos_http_route_discovery(
     return result
 
 
+@mcp.tool()
+def openmythos_http_security_headers(
+    url: str = "http://127.0.0.1:3000",
+) -> Dict[str, Any]:
+    # Passive security-header assessment for an allowed localhost-only URL.
+    # Uses HEAD only. No crawling, fuzzing, auth, form submission, or mutation.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("http_security_headers_blocked", result)
+        return result
+
+    head = _http_probe(url=url, method="HEAD", max_bytes=0)
+    headers_raw = head.get("headers") or {}
+    headers = {str(k).lower(): str(v) for k, v in headers_raw.items()}
+
+    required = {
+        "x-content-type-options": {
+            "expected": "nosniff",
+            "severity_if_missing": "medium",
+        },
+        "x-frame-options": {
+            "expected": "DENY or SAMEORIGIN",
+            "severity_if_missing": "medium",
+        },
+        "content-security-policy": {
+            "expected": "site-specific CSP",
+            "severity_if_missing": "medium",
+        },
+        "referrer-policy": {
+            "expected": "no-referrer or strict-origin-when-cross-origin",
+            "severity_if_missing": "low",
+        },
+        "permissions-policy": {
+            "expected": "least-privilege browser feature policy",
+            "severity_if_missing": "low",
+        },
+        "strict-transport-security": {
+            "expected": "HSTS on HTTPS only",
+            "severity_if_missing": "info",
+        },
+    }
+
+    findings = []
+    present = {}
+
+    for name, meta in required.items():
+        value = headers.get(name)
+        present[name] = value
+
+        if value is None:
+            findings.append({
+                "header": name,
+                "status": "missing",
+                "severity": meta["severity_if_missing"],
+                "expected": meta["expected"],
+            })
+        else:
+            findings.append({
+                "header": name,
+                "status": "present",
+                "severity": "info",
+                "value": value,
+                "expected": meta["expected"],
+            })
+
+    cors = headers.get("access-control-allow-origin")
+    if cors == "*":
+        findings.append({
+            "header": "access-control-allow-origin",
+            "status": "present",
+            "severity": "review",
+            "value": cors,
+            "note": "Wildcard CORS observed. Review whether this is intended for the lab app.",
+        })
+
+    result = {
+        "ok": bool(head.get("ok")),
+        "mode": "passive_head_only",
+        "url": url,
+        "url_validation": validation,
+        "status": head.get("status"),
+        "headers": headers_raw,
+        "assessed_headers": present,
+        "findings": findings,
+        "notes": [
+            "passive HEAD request only",
+            "localhost-only URL policy enforced",
+            "no crawling",
+            "no fuzzing",
+            "no exploitation",
+            "no form submission",
+            "no authentication attempted",
+        ],
+    }
+
+    audit_event("http_security_headers", {
+        "ok": result["ok"],
+        "url": url,
+        "status": result["status"],
+        "finding_count": len(findings),
+    })
+
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()
