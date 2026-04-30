@@ -40,6 +40,12 @@ jobs:
       - name: Run active lab readiness check
         run: ./lab/scripts/readiness-check
 
+      - name: Verify active execution lock
+        run: |
+          test -f lab/policies/execution_lock.json
+          pytest -q tests/test_execution_lock.py
+
+
       - name: Verify active dry-run executes zero requests
         run: |
           ./lab/scripts/active-dry-run http://127.0.0.1:3000 I_APPROVE_ACTIVE_LOCAL_ONLY_TEST > active-dry-run.json

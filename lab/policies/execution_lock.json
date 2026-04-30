@@ -1,0 +1,44 @@
+{
+  "name": "OpenMythos active execution lock",
+  "version": "0.4.1",
+  "status": "locked_dry_run_only",
+  "active_execution_allowed": false,
+  "fuzzing_execution_allowed": false,
+  "public_target_support_allowed": false,
+  "active_tools_enabled_required": false,
+  "fuzzing_enabled_required": false,
+  "kill_switch_enabled_required": true,
+  "default_mode_required": "dry_run",
+  "requires_security_review_to_change": true,
+  "requires_new_milestone_to_change": true,
+  "requires_ci_update_to_change": true,
+  "locked_scripts": [
+    "lab/scripts/active-dry-run",
+    "lab/scripts/fuzz-dry-run"
+  ],
+  "prohibited_runtime_markers": [
+    "requests.",
+    "urllib.request",
+    "http.client",
+    "socket.",
+    "subprocess.run",
+    "os.system",
+    "curl ",
+    "wget ",
+    "_http_probe("
+  ],
+  "required_output_fields": [
+    "executes_requests",
+    "execution_blocked",
+    "blocked",
+    "ok"
+  ],
+  "required_safety_invariants": [
+    "active dry-run executes zero requests",
+    "bounded fuzz dry-run executes zero requests",
+    "public targets are blocked",
+    "kill switch remains enabled",
+    "fuzzing remains disabled by policy",
+    "active tools remain disabled"
+  ]
+}
