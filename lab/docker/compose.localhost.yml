@@ -1,0 +1,25 @@
+name: openmythos-local-lab
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop:latest
+    container_name: openmythos-juice-shop
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks:
+      - openmythos_lab
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      openmythos.lab: "true"
+      openmythos.target_scope: "localhost-only"
+      openmythos.allowed_url: "http://127.0.0.1:3000"
+
+networks:
+  openmythos_lab:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"
