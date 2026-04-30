@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  test:
+  test-and-safety-gates:
     runs-on: ubuntu-latest
 
     steps:
@@ -25,8 +25,62 @@ jobs:
       - name: Compile MCP
         run: python -m py_compile mcp/openmythos_0ai_mcp.py
 
+      - name: Verify lab scripts are executable
+        run: |
+          test -x lab/scripts/passive-audit
+          test -x lab/scripts/active-dry-run
+          test -x lab/scripts/fuzz-dry-run
+          test -x lab/scripts/dryrun-evidence-report
+          test -x lab/scripts/readiness-check
+          test -x lab/scripts/release-manifest
+
       - name: Run tests
         run: pytest -q
+
+      - name: Run active lab readiness check
+        run: ./lab/scripts/readiness-check
+
+      - name: Verify active dry-run executes zero requests
+        run: |
+          ./lab/scripts/active-dry-run http://127.0.0.1:3000 I_APPROVE_ACTIVE_LOCAL_ONLY_TEST > active-dry-run.json
+          python - <<'PY'
+          import json
+          data = json.load(open("active-dry-run.json"))
+          assert data["ok"] is True
+          assert data["executes_requests"] is False
+          assert data["execution_blocked"] is True
+          assert data["planned_request_count"] <= data["controls"]["max_requests_per_run"]
+          PY
+
+      - name: Verify bounded fuzz dry-run executes zero requests
+        run: |
+          ./lab/scripts/fuzz-dry-run http://127.0.0.1:3000 I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING > fuzz-dry-run.json
+          python - <<'PY'
+          import json
+          data = json.load(open("fuzz-dry-run.json"))
+          assert data["ok"] is True
+          assert data["executes_requests"] is False
+          assert data["execution_blocked"] is True
+          assert data["planned_case_count"] <= data["policy"]["max_requests_per_run"]
+          for case in data["planned_cases"]:
+              assert case["executes"] is False
+              assert case["request_preview_only"] is True
+          PY
+
+      - name: Verify public targets are blocked
+        run: |
+          ./lab/scripts/active-dry-run http://example.com I_APPROVE_ACTIVE_LOCAL_ONLY_TEST > active-public.json
+          ./lab/scripts/fuzz-dry-run http://example.com I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING > fuzz-public.json
+          python - <<'PY'
+          import json
+          for path in ["active-public.json", "fuzz-public.json"]:
+              data = json.load(open(path))
+              assert data["ok"] is False
+              assert data["blocked"] is True
+          PY
+
+      - name: Generate release manifest
+        run: ./lab/scripts/release-manifest
 
       - name: Build package
         run: python -m build
