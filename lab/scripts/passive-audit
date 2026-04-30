@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+source .venv/bin/activate
+
+python - <<'PY'
+import importlib.util
+from pathlib import Path
+
+path = Path("mcp/openmythos_0ai_mcp.py")
+spec = importlib.util.spec_from_file_location("openmythos_mcp", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+url = "http://127.0.0.1:3000"
+approval = "I_APPROVE_LOCAL_ONLY_HTTP_GET"
+
+print("[+] validating URL")
+print(mod.openmythos_validate_url(url))
+
+print("[+] fingerprinting")
+print(mod.openmythos_http_fingerprint(url, approval=approval))
+
+print("[+] route discovery")
+print(mod.openmythos_http_route_discovery(url, approval=approval))
+
+print("[+] security headers")
+print(mod.openmythos_http_security_headers(url))
+
+print("[+] generating report")
+print(mod.openmythos_generate_lab_report(url, approval=approval))
+PY
+
+echo
+echo "[+] Report:"
+echo "    lab/reports/latest_lab_report.md"
