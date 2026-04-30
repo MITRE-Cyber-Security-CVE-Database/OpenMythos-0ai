@@ -438,3 +438,6 @@ lab/reports/
 
 # OpenMythos lab generated evidence
 lab/evidence/
+
+# OpenMythos lab generated readiness reports
+lab/readiness/

@@ -1,0 +1,310 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+mkdir -p lab/readiness
+
+python - <<'PY'
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+OUT_JSON = Path("lab/readiness/latest_readiness.json")
+OUT_MD = Path("lab/readiness/latest_readiness.md")
+
+LOCAL_URL = "http://127.0.0.1:3000"
+PUBLIC_URL = "http://example.com"
+
+ACTIVE_APPROVAL = "I_APPROVE_ACTIVE_LOCAL_ONLY_TEST"
+FUZZ_APPROVAL = "I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING"
+
+required_files = [
+    "lab/policies/active_testing_policy.json",
+    "lab/policies/active_controls.json",
+    "lab/policies/bounded_fuzzing_policy.json",
+    "lab/scripts/active-dry-run",
+    "lab/scripts/fuzz-dry-run",
+    "lab/scripts/dryrun-evidence-report",
+    "tests/test_active_dry_run.py",
+    "tests/test_fuzz_dry_run.py",
+    "tests/test_bounded_fuzzing_policy.py",
+]
+
+def load_json(path):
+    return json.loads(Path(path).read_text())
+
+def run_json(args):
+    proc = subprocess.run(args, text=True, capture_output=True, check=True)
+    return json.loads(proc.stdout)
+
+checks = []
+
+def check(name, ok, details=None):
+    checks.append({
+        "name": name,
+        "ok": bool(ok),
+        "details": details or {},
+    })
+
+for path in required_files:
+    check(f"required file exists: {path}", Path(path).exists())
+
+active_policy = load_json("lab/policies/active_testing_policy.json")
+active_controls = load_json("lab/policies/active_controls.json")
+fuzz_policy = load_json("lab/policies/bounded_fuzzing_policy.json")
+
+check(
+    "active tools disabled",
+    active_controls.get("active_tools_enabled") is False,
+    {"active_tools_enabled": active_controls.get("active_tools_enabled")},
+)
+
+check(
+    "active kill switch enabled",
+    active_controls.get("kill_switch_enabled") is True,
+    {"kill_switch_enabled": active_controls.get("kill_switch_enabled")},
+)
+
+check(
+    "active default mode is dry_run",
+    active_controls.get("default_mode") == "dry_run",
+    {"default_mode": active_controls.get("default_mode")},
+)
+
+check(
+    "fuzzing disabled",
+    fuzz_policy.get("fuzzing_enabled") is False,
+    {"fuzzing_enabled": fuzz_policy.get("fuzzing_enabled")},
+)
+
+check(
+    "fuzzing default mode is dry_run",
+    fuzz_policy.get("default_mode") == "dry_run",
+    {"default_mode": fuzz_policy.get("default_mode")},
+)
+
+check(
+    "public target support disabled",
+    fuzz_policy.get("public_targets_allowed") is False,
+    {"public_targets_allowed": fuzz_policy.get("public_targets_allowed")},
+)
+
+disabled = set(active_policy.get("disabled_capabilities", []))
+prohibited_actions = set(fuzz_policy.get("prohibited_actions", []))
+prohibited_payloads = set(fuzz_policy.get("prohibited_payload_classes", []))
+
+for capability in [
+    "fuzzing",
+    "login attempts",
+    "payload injection",
+    "exploit modules",
+    "broad crawling",
+    "public target support",
+]:
+    check(
+        f"active policy disables: {capability}",
+        capability in disabled,
+    )
+
+for action in [
+    "auth_login_attempts",
+    "exploit_execution",
+    "broad_crawling",
+    "public_target_testing",
+    "data_exfiltration",
+    "denial_of_service",
+]:
+    check(
+        f"fuzz policy prohibits action: {action}",
+        action in prohibited_actions,
+    )
+
+for payload_class in [
+    "sql_injection",
+    "xss",
+    "command_injection",
+    "shell_metacharacter_payloads",
+    "exploit_payloads",
+    "destructive_payloads",
+]:
+    check(
+        f"fuzz policy prohibits payload class: {payload_class}",
+        payload_class in prohibited_payloads,
+    )
+
+active_local = run_json(["lab/scripts/active-dry-run", LOCAL_URL, ACTIVE_APPROVAL])
+active_public = run_json(["lab/scripts/active-dry-run", PUBLIC_URL, ACTIVE_APPROVAL])
+fuzz_local = run_json(["lab/scripts/fuzz-dry-run", LOCAL_URL, FUZZ_APPROVAL])
+fuzz_public = run_json(["lab/scripts/fuzz-dry-run", PUBLIC_URL, FUZZ_APPROVAL])
+
+check(
+    "active dry-run local ok",
+    active_local.get("ok") is True,
+    {"reason": active_local.get("reason")},
+)
+
+check(
+    "active dry-run executes zero requests",
+    active_local.get("executes_requests") is False and active_local.get("execution_blocked") is True,
+    {
+        "executes_requests": active_local.get("executes_requests"),
+        "execution_blocked": active_local.get("execution_blocked"),
+    },
+)
+
+check(
+    "active dry-run blocks public URL",
+    active_public.get("blocked") is True and active_public.get("ok") is False,
+    {"reason": active_public.get("reason")},
+)
+
+check(
+    "fuzz dry-run local ok",
+    fuzz_local.get("ok") is True,
+    {"reason": fuzz_local.get("reason")},
+)
+
+check(
+    "fuzz dry-run executes zero requests",
+    fuzz_local.get("executes_requests") is False and fuzz_local.get("execution_blocked") is True,
+    {
+        "executes_requests": fuzz_local.get("executes_requests"),
+        "execution_blocked": fuzz_local.get("execution_blocked"),
+    },
+)
+
+check(
+    "fuzz dry-run blocks public URL",
+    fuzz_public.get("blocked") is True and fuzz_public.get("ok") is False,
+    {"reason": fuzz_public.get("reason")},
+)
+
+check(
+    "fuzz dry-run honors request cap",
+    fuzz_local.get("planned_case_count", 999999) <= fuzz_policy.get("max_requests_per_run", 0),
+    {
+        "planned_case_count": fuzz_local.get("planned_case_count"),
+        "max_requests_per_run": fuzz_policy.get("max_requests_per_run"),
+    },
+)
+
+for case in fuzz_local.get("planned_cases", []):
+    check(
+        f"fuzz case executes false: {case.get('class')}",
+        case.get("executes") is False and case.get("request_preview_only") is True,
+    )
+
+passed = sum(1 for item in checks if item["ok"])
+failed = [item for item in checks if not item["ok"]]
+
+report = {
+    "ok": not failed,
+    "mode": "active_lab_readiness_check",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "summary": {
+        "passed": passed,
+        "failed": len(failed),
+        "total": len(checks),
+    },
+    "checks": checks,
+    "active_local_summary": {
+        "ok": active_local.get("ok"),
+        "executes_requests": active_local.get("executes_requests"),
+        "execution_blocked": active_local.get("execution_blocked"),
+        "planned_request_count": active_local.get("planned_request_count"),
+        "reason": active_local.get("reason"),
+    },
+    "fuzz_local_summary": {
+        "ok": fuzz_local.get("ok"),
+        "executes_requests": fuzz_local.get("executes_requests"),
+        "execution_blocked": fuzz_local.get("execution_blocked"),
+        "planned_case_count": fuzz_local.get("planned_case_count"),
+        "reason": fuzz_local.get("reason"),
+    },
+    "safety_assertions": [
+        "active tools remain disabled",
+        "kill switch remains enabled",
+        "active dry-run executes zero requests",
+        "fuzz dry-run executes zero requests",
+        "fuzzing remains disabled by policy",
+        "public target support remains disabled",
+        "exploit payloads remain prohibited",
+        "login attempts remain prohibited",
+        "broad crawling remains prohibited",
+    ],
+}
+
+OUT_JSON.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+md = [
+    "# OpenMythos Active Lab Readiness Check",
+    "",
+    f"- Generated: `{report['generated_at']}`",
+    f"- Mode: `{report['mode']}`",
+    f"- Overall OK: `{report['ok']}`",
+    f"- Passed: `{passed}`",
+    f"- Failed: `{len(failed)}`",
+    f"- Total: `{len(checks)}`",
+    "",
+    "## Active Dry-Run Summary",
+    "",
+    f"- OK: `{report['active_local_summary']['ok']}`",
+    f"- Executes requests: `{report['active_local_summary']['executes_requests']}`",
+    f"- Execution blocked: `{report['active_local_summary']['execution_blocked']}`",
+    f"- Planned request count: `{report['active_local_summary']['planned_request_count']}`",
+    f"- Reason: `{report['active_local_summary']['reason']}`",
+    "",
+    "## Bounded Fuzz Dry-Run Summary",
+    "",
+    f"- OK: `{report['fuzz_local_summary']['ok']}`",
+    f"- Executes requests: `{report['fuzz_local_summary']['executes_requests']}`",
+    f"- Execution blocked: `{report['fuzz_local_summary']['execution_blocked']}`",
+    f"- Planned case count: `{report['fuzz_local_summary']['planned_case_count']}`",
+    f"- Reason: `{report['fuzz_local_summary']['reason']}`",
+    "",
+    "## Safety Assertions",
+    "",
+]
+
+for assertion in report["safety_assertions"]:
+    md.append(f"- {assertion}")
+
+md.extend([
+    "",
+    "## Failed Checks",
+    "",
+])
+
+if failed:
+    for item in failed:
+        md.append(f"- `{item['name']}` — {item.get('details', {})}")
+else:
+    md.append("- None")
+
+md.extend([
+    "",
+    "## All Checks",
+    "",
+])
+
+for item in checks:
+    marker = "PASS" if item["ok"] else "FAIL"
+    md.append(f"- `{marker}` {item['name']}")
+
+OUT_MD.write_text("\n".join(md), encoding="utf-8")
+
+print(json.dumps({
+    "ok": report["ok"],
+    "json": str(OUT_JSON),
+    "markdown": str(OUT_MD),
+    "passed": passed,
+    "failed": len(failed),
+    "total": len(checks),
+}, indent=2, sort_keys=True))
+
+if failed:
+    raise SystemExit(1)
+PY
