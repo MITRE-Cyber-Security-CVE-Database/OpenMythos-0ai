@@ -146,33 +146,34 @@ def precompute_rope_freqs(
 
 def apply_rope(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
     """
-    Apply rotary positional embeddings to query or key tensors.
+    Apply rotary positional embeddings to query/key tensors.
 
-    Interprets each pair of adjacent features as a 2D complex number and
-    multiplies by the precomputed phasor for that position, rotating the
-    representation in the complex plane without changing its norm.
-
-    Args:
-        x         -- tensor of shape (B, T, H, head_dim); head_dim must be even
-        freqs_cis -- precomputed complex frequencies of shape (T, head_dim//2),
-                     already sliced to exactly the positions being processed
-                     (caller is responsible for correct start_pos offset)
-
-    Returns:
-        Rotated tensor of the same shape and dtype as x
+    Accepts x shaped (B, T, H, head_dim) and freqs_cis shaped
+    (max_seq_len, rotary_dim_pairs). The frequency table is sliced to the
+    active sequence length and active rotary dimension before multiplication.
     """
-    xc = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-    return (
-        torch.view_as_real(xc * freqs_cis.unsqueeze(0).unsqueeze(2))
-        .flatten(-2)
-        .to(x.dtype)
-    )
+    if x.shape[-1] % 2 != 0:
+        raise ValueError(f"RoPE head_dim must be even, got {x.shape[-1]}")
 
+    seq_len = x.shape[1]
+    rotary_pairs = x.shape[-1] // 2
 
-# ---------------------------------------------------------------------------
-# Grouped Query Attention with KV cache
-# ---------------------------------------------------------------------------
+    if freqs_cis.shape[0] < seq_len:
+        raise RuntimeError(
+            f"freqs_cis sequence length {freqs_cis.shape[0]} is smaller than input sequence length {seq_len}"
+        )
 
+    if freqs_cis.shape[-1] < rotary_pairs:
+        raise ValueError(
+            f"freqs_cis rotary dim {freqs_cis.shape[-1]} is smaller than required rotary pairs {rotary_pairs}"
+        )
+
+    freqs = freqs_cis[:seq_len, :rotary_pairs].to(device=x.device)
+
+    xc = torch.view_as_complex(x.float().reshape(*x.shape[:-1], rotary_pairs, 2))
+    out = torch.view_as_real(xc * freqs.unsqueeze(0).unsqueeze(2)).flatten(-2)
+
+    return out.to(dtype=x.dtype)
 
 class GQAttention(nn.Module):
     """
@@ -721,8 +722,10 @@ class LTIInjection(nn.Module):
         """
         # Compute in log space to avoid 0 * inf = NaN when log_dt → -∞, log_A → +∞.
         # dt * A_c = -exp(log_dt) * exp(log_A) = -exp(log_dt + log_A)
-        # Clamp keeps the product finite in float32 for any gradient step size.
-        return torch.exp(-torch.exp((self.log_dt + self.log_A).clamp(-20, 20)))
+        # Clamp keeps the product finite, and clamp_min keeps A strictly below 1.0 in float32.
+        log_decay = (self.log_dt + self.log_A).clamp(-20, 20)
+        decay = torch.exp(log_decay).clamp_min(1e-4)
+        return torch.exp(-decay)
 
     def forward(
         self, h: torch.Tensor, e: torch.Tensor, transformer_out: torch.Tensor
