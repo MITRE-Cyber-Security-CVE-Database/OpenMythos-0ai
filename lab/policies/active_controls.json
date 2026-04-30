@@ -1,0 +1,23 @@
+{
+  "name": "OpenMythos active lab controls",
+  "version": "0.2.0",
+  "active_tools_enabled": false,
+  "kill_switch_enabled": true,
+  "default_mode": "dry_run",
+  "max_requests_per_run": 25,
+  "max_request_rate_per_second": 1,
+  "timeout_seconds": 10,
+  "allowed_schemes": ["http", "https"],
+  "allowed_hosts": ["127.0.0.1", "localhost", "::1"],
+  "require_same_origin": true,
+  "require_explicit_approval": true,
+  "approval_phrase": "I_APPROVE_ACTIVE_LOCAL_ONLY_TEST",
+  "disabled_capabilities": [
+    "fuzzing",
+    "login attempts",
+    "payload injection",
+    "exploit modules",
+    "broad crawling",
+    "public target support"
+  ]
+}
