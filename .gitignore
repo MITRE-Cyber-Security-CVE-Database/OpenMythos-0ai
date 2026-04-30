@@ -435,3 +435,6 @@ reports/
 
 # OpenMythos lab generated reports
 lab/reports/
+
+# OpenMythos lab generated evidence
+lab/evidence/
