@@ -1012,5 +1012,161 @@ def openmythos_http_security_headers(
     return result
 
 
+@mcp.tool()
+def openmythos_generate_lab_report(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+) -> Dict[str, Any]:
+    # Generate a local read-only lab report from passive localhost-only checks.
+    # Performs approved bounded GET through existing tools; no fuzzing, crawling,
+    # exploitation, authentication, form submission, or mutation.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("lab_report_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("lab_report_missing_approval", result)
+        return result
+
+    parsed = urlparse(url)
+    port = str(parsed.port or (443 if parsed.scheme == "https" else 80))
+    host = parsed.hostname or "127.0.0.1"
+
+    scan_plan = openmythos_lab_scan_plan(host, port)
+    fingerprint = openmythos_http_fingerprint(url, approval=approval)
+    routes = openmythos_http_route_discovery(
+        url,
+        approval=approval,
+        max_bytes=32768,
+        max_routes=100,
+    )
+    headers = openmythos_http_security_headers(url)
+
+    report = {
+        "ok": True,
+        "mode": "local_only_passive_lab_report",
+        "url": url,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "url_validation": validation,
+        "scan_plan": scan_plan,
+        "fingerprint": fingerprint,
+        "route_discovery": routes,
+        "security_headers": headers,
+        "safety_notes": [
+            "localhost-only URL policy enforced",
+            "public targets blocked",
+            "passive report generation only",
+            "no crawling beyond single-page route extraction",
+            "no fuzzing",
+            "no exploitation",
+            "no authentication attempted",
+            "no form submission",
+            "no data exfiltration",
+        ],
+    }
+
+    reports_dir = REPO / "lab" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    json_path = reports_dir / "latest_lab_report.json"
+    md_path = reports_dir / "latest_lab_report.md"
+
+    json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
+
+    title = fingerprint.get("title") or "Unknown"
+    indicators = fingerprint.get("indicators") or []
+    findings = headers.get("findings") or []
+    route_count = routes.get("same_origin_route_count")
+
+    md_lines = [
+        "# OpenMythos Localhost Lab Report",
+        "",
+        f"- Generated: {report['generated_at']}",
+        f"- URL: `{url}`",
+        f"- Title: `{title}`",
+        f"- Mode: `{report['mode']}`",
+        "",
+        "## Safety Scope",
+        "",
+    ]
+
+    for note in report["safety_notes"]:
+        md_lines.append(f"- {note}")
+
+    md_lines.extend([
+        "",
+        "## Fingerprint",
+        "",
+        f"- HTTP status: `{fingerprint.get('get_status')}`",
+        f"- Indicators: `{', '.join(indicators) if indicators else 'none'}`",
+        "",
+        "## Route Discovery",
+        "",
+        f"- Same-origin routes discovered: `{route_count}`",
+    ])
+
+    for route in (routes.get("same_origin_routes") or [])[:20]:
+        md_lines.append(f"- `{route.get('path')}` from `{route.get('attr')}`")
+
+    md_lines.extend([
+        "",
+        "## Security Header Findings",
+        "",
+    ])
+
+    for finding in findings:
+        status = finding.get("status")
+        severity = finding.get("severity")
+        header = finding.get("header")
+        expected = finding.get("expected") or finding.get("note", "")
+        value = finding.get("value")
+        value_text = f" value=`{value}`" if value is not None else ""
+        md_lines.append(
+            f"- `{header}`: {status}, severity `{severity}`{value_text}. {expected}"
+        )
+
+    md_lines.extend([
+        "",
+        "## Scan Plan",
+        "",
+        f"- Dry-run command: `{scan_plan.get('would_run')}`",
+        "",
+        "## Notes",
+        "",
+        "This report is generated from local-only MCP checks and is not evidence of authorization for any public target.",
+        "",
+    ])
+
+    md_path.write_text("\n".join(md_lines), encoding="utf-8")
+
+    result = {
+        "ok": True,
+        "url": url,
+        "json_report": str(json_path.relative_to(REPO)),
+        "markdown_report": str(md_path.relative_to(REPO)),
+        "title": title,
+        "indicator_count": len(indicators),
+        "route_count": route_count,
+        "security_finding_count": len(findings),
+    }
+
+    audit_event("lab_report_generated", result)
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()

@@ -432,3 +432,6 @@ flycheck_*.el
 # OpenMythos generated outputs
 artifacts/
 reports/
+
+# OpenMythos lab generated reports
+lab/reports/
