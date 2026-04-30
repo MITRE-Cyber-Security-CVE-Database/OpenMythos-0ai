@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmythos.local/schemas/lab_report.schema.json",
+  "title": "OpenMythos Localhost Lab Report",
+  "type": "object",
+  "required": [
+    "ok",
+    "mode",
+    "url",
+    "generated_at",
+    "url_validation",
+    "scan_plan",
+    "fingerprint",
+    "route_discovery",
+    "security_headers",
+    "safety_notes"
+  ],
+  "properties": {
+    "ok": { "type": "boolean" },
+    "mode": { "const": "local_only_passive_lab_report" },
+    "url": { "type": "string" },
+    "generated_at": { "type": "string" },
+    "url_validation": { "type": "object" },
+    "scan_plan": { "type": "object" },
+    "fingerprint": { "type": "object" },
+    "route_discovery": { "type": "object" },
+    "security_headers": { "type": "object" },
+    "safety_notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

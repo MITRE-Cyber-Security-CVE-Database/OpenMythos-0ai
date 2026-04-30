@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+REPORT="${1:-lab/reports/latest_lab_report.json}"
+
+python - "$REPORT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+report_path = Path(sys.argv[1])
+schema_path = Path("lab/schemas/lab_report.schema.json")
+
+if not report_path.exists():
+    raise SystemExit(f"[!] Missing report: {report_path}")
+
+report = json.loads(report_path.read_text())
+schema = json.loads(schema_path.read_text())
+
+missing = [k for k in schema["required"] if k not in report]
+if missing:
+    raise SystemExit(f"[!] Missing required report keys: {missing}")
+
+if report.get("mode") != "local_only_passive_lab_report":
+    raise SystemExit(f"[!] Unexpected mode: {report.get('mode')}")
+
+if not isinstance(report.get("safety_notes"), list):
+    raise SystemExit("[!] safety_notes must be a list")
+
+print("[+] report schema validation OK:", report_path)
+PY

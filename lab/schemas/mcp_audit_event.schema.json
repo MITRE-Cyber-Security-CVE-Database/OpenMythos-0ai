@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmythos.local/schemas/mcp_audit_event.schema.json",
+  "title": "OpenMythos MCP Audit Event",
+  "type": "object",
+  "required": ["ts", "action", "payload"],
+  "properties": {
+    "ts": { "type": "string" },
+    "action": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}
