@@ -29,6 +29,8 @@ def assert_repo_safe() -> None:
 from typing import Dict, Any, List
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+import urllib.request
+import urllib.error
 
 from fastmcp import FastMCP
 
@@ -491,6 +493,140 @@ def openmythos_localhost_nmap_active(
         "returncode": result.get("returncode"),
     })
     return result
+
+
+
+def _http_probe(url: str, method: str = "HEAD", max_bytes: int = 4096) -> Dict[str, Any]:
+    """
+    Perform a minimal HTTP request against a validated local-only URL.
+    """
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("http_probe_blocked", result)
+        return result
+
+    method = method.upper()
+    if method not in {"HEAD", "GET"}:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked: only HEAD and GET are supported",
+        }
+        audit_event("http_probe_bad_method", result)
+        return result
+
+    req = urllib.request.Request(
+        url,
+        method=method,
+        headers={
+            "User-Agent": "OpenMythos-LocalLab/0.1",
+            "Accept": "text/html,application/json,text/plain,*/*",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = b""
+            if method == "GET":
+                body = resp.read(max(0, min(int(max_bytes), 16384)))
+
+            result = {
+                "ok": True,
+                "url": url,
+                "method": method,
+                "status": getattr(resp, "status", None),
+                "reason": getattr(resp, "reason", None),
+                "headers": dict(resp.headers.items()),
+                "body_preview": body.decode("utf-8", errors="replace") if body else "",
+                "body_preview_bytes": len(body),
+                "url_validation": validation,
+            }
+            audit_event("http_probe", {
+                "ok": True,
+                "url": url,
+                "method": method,
+                "status": result["status"],
+                "body_preview_bytes": result["body_preview_bytes"],
+            })
+            return result
+
+    except urllib.error.HTTPError as exc:
+        body = exc.read(max(0, min(int(max_bytes), 16384))) if method == "GET" else b""
+        result = {
+            "ok": False,
+            "url": url,
+            "method": method,
+            "status": exc.code,
+            "reason": str(exc.reason),
+            "headers": dict(exc.headers.items()) if exc.headers else {},
+            "body_preview": body.decode("utf-8", errors="replace") if body else "",
+            "body_preview_bytes": len(body),
+            "url_validation": validation,
+        }
+        audit_event("http_probe_http_error", {
+            "ok": False,
+            "url": url,
+            "method": method,
+            "status": exc.code,
+        })
+        return result
+
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "url": url,
+            "method": method,
+            "error": repr(exc),
+            "url_validation": validation,
+        }
+        audit_event("http_probe_error", {
+            "ok": False,
+            "url": url,
+            "method": method,
+            "error": repr(exc),
+        })
+        return result
+
+
+@mcp.tool()
+def openmythos_http_head(url: str) -> Dict[str, Any]:
+    """
+    Send a HEAD request to an allowed localhost-only URL.
+    """
+    return _http_probe(url=url, method="HEAD", max_bytes=0)
+
+
+@mcp.tool()
+def openmythos_http_get_preview(
+    url: str,
+    approval: str = "",
+    max_bytes: int = 4096,
+) -> Dict[str, Any]:
+    """
+    Send a GET request to an allowed localhost-only URL and return a bounded preview.
+
+    Requires approval='I_APPROVE_LOCAL_ONLY_HTTP_GET'.
+    """
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        validation = validate_local_url(url)
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("http_get_missing_approval", result)
+        return result
+
+    return _http_probe(url=url, method="GET", max_bytes=max_bytes)
 
 
 if __name__ == "__main__":
