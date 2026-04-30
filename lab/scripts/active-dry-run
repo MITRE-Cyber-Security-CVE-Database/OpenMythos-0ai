@@ -17,7 +17,8 @@ from urllib.parse import urlparse
 url = sys.argv[1]
 approval = sys.argv[2]
 
-controls = json.loads(Path("lab/policies/active_controls.json").read_text())
+controls_path = Path("lab/policies/active_controls.json")
+controls = json.loads(controls_path.read_text())
 
 path = Path("mcp/openmythos_0ai_mcp.py")
 spec = importlib.util.spec_from_file_location("openmythos_mcp", path)
@@ -25,6 +26,31 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 validation = mod.validate_local_url(url)
+
+max_requests = int(controls.get("max_requests_per_run", 25))
+max_requests = max(1, min(max_requests, 25))
+
+parsed = urlparse(url)
+base_path = parsed.path or "/"
+
+candidate_paths = [
+    base_path,
+    "/robots.txt",
+    "/sitemap.xml",
+    "/assets/public/favicon_js.ico"
+]
+
+candidate_paths = candidate_paths[:max_requests]
+
+planned_requests = [
+    {
+        "method": "HEAD",
+        "path": path,
+        "purpose": "non-mutating metadata check",
+        "executes": False
+    }
+    for path in candidate_paths
+]
 
 result = {
     "ok": False,
@@ -39,47 +65,55 @@ result = {
         "max_requests_per_run": controls.get("max_requests_per_run"),
         "max_request_rate_per_second": controls.get("max_request_rate_per_second"),
         "timeout_seconds": controls.get("timeout_seconds"),
+        "require_same_origin": controls.get("require_same_origin"),
+        "require_explicit_approval": controls.get("require_explicit_approval")
     },
-    "planned_requests": [],
+    "planned_request_count": len(planned_requests),
+    "planned_requests": planned_requests,
     "blocked": False,
+    "execution_blocked": True,
     "reason": None,
+    "notes": [
+        "dry-run planner only",
+        "no HTTP requests executed by this script",
+        "no fuzzing",
+        "no payload injection",
+        "no login attempts",
+        "no exploit modules",
+        "no broad crawling",
+        "no public target support"
+    ]
 }
 
-if controls.get("kill_switch_enabled") is True:
-    result["blocked"] = True
-    result["reason"] = "kill switch enabled; active dry-run planner refuses execution and only prints plan"
-elif controls.get("active_tools_enabled") is not False:
-    result["blocked"] = True
-    result["reason"] = "unexpected active_tools_enabled value"
-elif controls.get("default_mode") != "dry_run":
-    result["blocked"] = True
-    result["reason"] = "default mode is not dry_run"
-elif not validation.get("ok"):
+if not validation.get("ok"):
     result["blocked"] = True
     result["reason"] = "blocked by local-only URL policy"
 elif approval != controls.get("approval_phrase"):
     result["blocked"] = True
     result["reason"] = "missing explicit active approval phrase"
     result["required_approval"] = controls.get("approval_phrase")
+elif controls.get("default_mode") != "dry_run":
+    result["blocked"] = True
+    result["reason"] = "default mode is not dry_run"
+elif controls.get("active_tools_enabled") is not False:
+    result["blocked"] = True
+    result["reason"] = "active tools are unexpectedly enabled"
 else:
-    parsed = urlparse(url)
-    base_path = parsed.path or "/"
-    cap = int(controls.get("max_requests_per_run", 25))
-    candidate_paths = [base_path, "/robots.txt", "/sitemap.xml"]
-    candidate_paths = candidate_paths[:cap]
-
     result["ok"] = True
     result["blocked"] = False
-    result["reason"] = "dry-run plan generated; no requests executed"
-    result["planned_requests"] = [
-        {
-            "method": "HEAD",
-            "path": path,
-            "purpose": "non-mutating metadata check",
-            "executes": False
-        }
-        for path in candidate_paths
-    ]
+    if controls.get("kill_switch_enabled") is True:
+        result["reason"] = "dry-run plan generated; kill switch remains enabled; execution is blocked"
+    else:
+        result["reason"] = "dry-run plan generated; execution still disabled by dry-run mode"
+
+mod.audit_event("active_dry_run_plan", {
+    "ok": result["ok"],
+    "url": url,
+    "blocked": result["blocked"],
+    "execution_blocked": result["execution_blocked"],
+    "planned_request_count": result["planned_request_count"],
+    "reason": result["reason"]
+})
 
 print(json.dumps(result, indent=2, sort_keys=True))
 PY
