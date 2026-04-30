@@ -6,6 +6,13 @@ cd "$ROOT"
 
 source .venv/bin/activate
 
+echo "[+] preflight: checking local lab target"
+if ! curl -fsS -I --max-time 10 http://127.0.0.1:3000 >/dev/null; then
+  echo "[!] Local lab target is not reachable: http://127.0.0.1:3000"
+  echo "    Start it with: sudo ./lab/scripts/labctl up"
+  exit 2
+fi
+
 python - <<'PY'
 import importlib.util
 from pathlib import Path
