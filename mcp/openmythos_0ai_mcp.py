@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import ipaddress
 import time
 import pathlib
 import subprocess
@@ -26,6 +27,7 @@ def assert_repo_safe() -> None:
         raise RuntimeError(f"Unsafe OPENMYTHOS_REPO override: {REPO}")
 
 from typing import Dict, Any, List
+from datetime import datetime, timezone
 
 from fastmcp import FastMCP
 
@@ -34,6 +36,75 @@ mcp = FastMCP("openmythos-0ai-kali")
 REPO = pathlib.Path(os.environ.get("OPENMYTHOS_REPO", str(pathlib.Path.home() / "OpenMythos-0ai"))).resolve()
 PYTHON = os.environ.get("OPENMYTHOS_PYTHON", sys.executable)
 TIMEOUT = int(os.environ.get("OPENMYTHOS_TIMEOUT", "90"))
+
+
+AUDIT_LOG = REPO / "lab_audit" / "logs" / "mcp_audit.jsonl"
+LOCAL_ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1"}
+LOCAL_ALLOWED_CIDRS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+]
+
+
+def audit_event(action: str, payload: Dict[str, Any]) -> None:
+    """
+    Append a JSONL audit event for every lab/pentest-relevant MCP action.
+    """
+    AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    event = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "action": action,
+        "payload": payload,
+    }
+    with AUDIT_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event, sort_keys=True) + "\n")
+
+
+def validate_local_target(target: str) -> Dict[str, Any]:
+    """
+    Permit only localhost / loopback targets.
+
+    This deliberately blocks public IPs, private LAN ranges, and domains until
+    the lab policy is expanded deliberately.
+    """
+    target = str(target).strip()
+
+    if target in LOCAL_ALLOWED_HOSTS:
+        return {
+            "ok": True,
+            "target": target,
+            "reason": "explicit localhost allowlist",
+        }
+
+    try:
+        ip = ipaddress.ip_address(target)
+    except ValueError:
+        return {
+            "ok": False,
+            "target": target,
+            "reason": "target is not a permitted localhost name or loopback IP",
+        }
+
+    for net in LOCAL_ALLOWED_CIDRS:
+        if ip in net:
+            return {
+                "ok": True,
+                "target": target,
+                "reason": f"target is inside allowed loopback CIDR {net}",
+            }
+
+    return {
+        "ok": False,
+        "target": target,
+        "reason": "blocked: only localhost / loopback targets are allowed",
+    }
+
+
+def require_explicit_approval(approval: str) -> bool:
+    """
+    Require a deliberate approval phrase for active local scans.
+    """
+    return approval == "I_APPROVE_LOCAL_ONLY_SCAN"
 
 
 def run_cmd(args: List[str], timeout: int = TIMEOUT) -> Dict[str, Any]:
@@ -271,6 +342,98 @@ def openmythos_safety_policy() -> Dict[str, Any]:
         ],
         "status": "repo/test/model smoke MCP only",
     }
+
+
+
+@mcp.tool()
+def openmythos_validate_target(target: str) -> Dict[str, Any]:
+    """
+    Validate whether a target is allowed under the local-only lab policy.
+    """
+    result = validate_local_target(target)
+    audit_event("validate_target", result)
+    return result
+
+
+@mcp.tool()
+def openmythos_lab_scan_plan(target: str = "127.0.0.1", ports: str = "1-1024") -> Dict[str, Any]:
+    """
+    Return a dry-run local scan plan. Does not execute nmap or any network tool.
+    """
+    validation = validate_local_target(target)
+
+    plan = {
+        "ok": validation["ok"],
+        "mode": "dry_run",
+        "target_validation": validation,
+        "would_run": None,
+        "policy": {
+            "network_tools_enabled": False,
+            "public_target_scanning_enabled": False,
+            "allowed_targets": sorted(LOCAL_ALLOWED_HOSTS),
+            "requires_explicit_approval_for_active_scan": True,
+        },
+    }
+
+    if validation["ok"]:
+        plan["would_run"] = ["nmap", "-sV", "-Pn", "-p", ports, target]
+
+    audit_event("lab_scan_plan", plan)
+    return plan
+
+
+@mcp.tool()
+def openmythos_localhost_nmap_dryrun(target: str = "127.0.0.1", ports: str = "1-1024") -> Dict[str, Any]:
+    """
+    Alias for dry-run localhost scan planning. Does not execute nmap.
+    """
+    return openmythos_lab_scan_plan(target=target, ports=ports)
+
+
+@mcp.tool()
+def openmythos_localhost_nmap_active(
+    target: str = "127.0.0.1",
+    ports: str = "1-1024",
+    approval: str = "",
+) -> Dict[str, Any]:
+    """
+    Run a strictly localhost-only nmap scan.
+
+    Requires approval='I_APPROVE_LOCAL_ONLY_SCAN'.
+    Blocks all non-loopback targets.
+    """
+    validation = validate_local_target(target)
+
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "target_validation": validation,
+            "reason": "active scan blocked by local-only target policy",
+        }
+        audit_event("localhost_nmap_active_blocked", result)
+        return result
+
+    if not require_explicit_approval(approval):
+        result = {
+            "ok": False,
+            "blocked": True,
+            "target_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_SCAN",
+        }
+        audit_event("localhost_nmap_active_missing_approval", result)
+        return result
+
+    cmd = ["nmap", "-sV", "-Pn", "-p", ports, target]
+    result = run_cmd(cmd, timeout=120)
+    audit_event("localhost_nmap_active", {
+        "target": target,
+        "ports": ports,
+        "ok": result.get("ok"),
+        "returncode": result.get("returncode"),
+    })
+    return result
 
 
 if __name__ == "__main__":
