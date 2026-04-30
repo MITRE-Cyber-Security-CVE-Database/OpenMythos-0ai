@@ -1168,5 +1168,138 @@ def openmythos_generate_lab_report(
     return result
 
 
+def _same_origin_special_url(base_url: str, path: str) -> str:
+    parsed = urlparse(base_url)
+    port = f":{parsed.port}" if parsed.port else ""
+    return f"{parsed.scheme}://{parsed.hostname}{port}{path}"
+
+
+@mcp.tool()
+def openmythos_fetch_robots_txt(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+) -> Dict[str, Any]:
+    # Passive robots.txt fetch for an allowed localhost-only origin.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("robots_txt_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("robots_txt_missing_approval", result)
+        return result
+
+    robots_url = _same_origin_special_url(url, "/robots.txt")
+    probe = _http_probe(robots_url, method="GET", max_bytes=8192)
+
+    lines = []
+    body = probe.get("body_preview", "") or ""
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            lines.append(stripped)
+
+    result = {
+        "ok": bool(probe.get("ok")),
+        "url": robots_url,
+        "base_url": url,
+        "status": probe.get("status"),
+        "body_preview_bytes": probe.get("body_preview_bytes", 0),
+        "directives": lines[:200],
+        "notes": [
+            "passive robots.txt fetch only",
+            "localhost-only URL policy enforced",
+            "no crawling performed",
+        ],
+    }
+
+    audit_event("robots_txt_fetch", {
+        "ok": result["ok"],
+        "url": robots_url,
+        "status": result["status"],
+        "directive_count": len(result["directives"]),
+    })
+
+    return result
+
+
+@mcp.tool()
+def openmythos_fetch_sitemap_xml(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+) -> Dict[str, Any]:
+    # Passive sitemap.xml fetch for an allowed localhost-only origin.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("sitemap_xml_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("sitemap_xml_missing_approval", result)
+        return result
+
+    sitemap_url = _same_origin_special_url(url, "/sitemap.xml")
+    probe = _http_probe(sitemap_url, method="GET", max_bytes=32768)
+
+    body = probe.get("body_preview", "") or ""
+    discovered_urls = []
+
+    for part in body.split("<loc>")[1:]:
+        loc = part.split("</loc>", 1)[0].strip()
+        loc_validation = validate_local_url(loc)
+        if loc_validation.get("ok"):
+            discovered_urls.append(loc)
+
+    result = {
+        "ok": bool(probe.get("ok")),
+        "url": sitemap_url,
+        "base_url": url,
+        "status": probe.get("status"),
+        "body_preview_bytes": probe.get("body_preview_bytes", 0),
+        "same_origin_urls": discovered_urls[:500],
+        "notes": [
+            "passive sitemap.xml fetch only",
+            "localhost-only URL policy enforced",
+            "no crawling performed",
+            "public URLs excluded",
+        ],
+    }
+
+    audit_event("sitemap_xml_fetch", {
+        "ok": result["ok"],
+        "url": sitemap_url,
+        "status": result["status"],
+        "same_origin_url_count": len(result["same_origin_urls"]),
+    })
+
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()
