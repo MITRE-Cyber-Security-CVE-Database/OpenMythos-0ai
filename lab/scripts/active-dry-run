@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+URL="${1:-http://127.0.0.1:3000}"
+APPROVAL="${2:-}"
+
+python - "$URL" "$APPROVAL" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+url = sys.argv[1]
+approval = sys.argv[2]
+
+controls = json.loads(Path("lab/policies/active_controls.json").read_text())
+
+path = Path("mcp/openmythos_0ai_mcp.py")
+spec = importlib.util.spec_from_file_location("openmythos_mcp", path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+validation = mod.validate_local_url(url)
+
+result = {
+    "ok": False,
+    "mode": "active_dry_run_only",
+    "executes_requests": False,
+    "url": url,
+    "url_validation": validation,
+    "controls": {
+        "active_tools_enabled": controls.get("active_tools_enabled"),
+        "kill_switch_enabled": controls.get("kill_switch_enabled"),
+        "default_mode": controls.get("default_mode"),
+        "max_requests_per_run": controls.get("max_requests_per_run"),
+        "max_request_rate_per_second": controls.get("max_request_rate_per_second"),
+        "timeout_seconds": controls.get("timeout_seconds"),
+    },
+    "planned_requests": [],
+    "blocked": False,
+    "reason": None,
+}
+
+if controls.get("kill_switch_enabled") is True:
+    result["blocked"] = True
+    result["reason"] = "kill switch enabled; active dry-run planner refuses execution and only prints plan"
+elif controls.get("active_tools_enabled") is not False:
+    result["blocked"] = True
+    result["reason"] = "unexpected active_tools_enabled value"
+elif controls.get("default_mode") != "dry_run":
+    result["blocked"] = True
+    result["reason"] = "default mode is not dry_run"
+elif not validation.get("ok"):
+    result["blocked"] = True
+    result["reason"] = "blocked by local-only URL policy"
+elif approval != controls.get("approval_phrase"):
+    result["blocked"] = True
+    result["reason"] = "missing explicit active approval phrase"
+    result["required_approval"] = controls.get("approval_phrase")
+else:
+    parsed = urlparse(url)
+    base_path = parsed.path or "/"
+    cap = int(controls.get("max_requests_per_run", 25))
+    candidate_paths = [base_path, "/robots.txt", "/sitemap.xml"]
+    candidate_paths = candidate_paths[:cap]
+
+    result["ok"] = True
+    result["blocked"] = False
+    result["reason"] = "dry-run plan generated; no requests executed"
+    result["planned_requests"] = [
+        {
+            "method": "HEAD",
+            "path": path,
+            "purpose": "non-mutating metadata check",
+            "executes": False
+        }
+        for path in candidate_paths
+    ]
+
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
