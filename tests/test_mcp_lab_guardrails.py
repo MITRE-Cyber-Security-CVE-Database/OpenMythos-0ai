@@ -68,3 +68,23 @@ def test_static_asset_inventory_blocks_public_url():
     )
     assert result["ok"] is False
     assert result["blocked"] is True
+
+
+def test_header_diff_blocks_public_base_url():
+    mod = load_mcp()
+    result = mod.openmythos_http_header_diff(
+        base_url="http://example.com",
+        paths=["/"],
+    )
+    assert result["ok"] is False
+    assert result["blocked"] is True
+
+
+def test_header_diff_blocks_external_absolute_path():
+    mod = load_mcp()
+    result = mod.openmythos_http_header_diff(
+        base_url="http://127.0.0.1:3000",
+        paths=["http://example.com/"],
+    )
+    assert result["ok"] is True
+    assert result["blocked_path_count"] == 1

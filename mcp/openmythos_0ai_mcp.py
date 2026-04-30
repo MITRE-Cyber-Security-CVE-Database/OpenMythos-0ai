@@ -1460,5 +1460,161 @@ def openmythos_http_static_asset_inventory(
     return result
 
 
+@mcp.tool()
+def openmythos_http_header_diff(
+    base_url: str = "http://127.0.0.1:3000",
+    paths: List[str] = None,
+    max_paths: int = 25,
+) -> Dict[str, Any]:
+    # Passive response-header diff across allowed localhost-only paths.
+    # Uses HEAD only. No crawling, fuzzing, auth, form submission, exploitation, or mutation.
+    validation = validate_local_url(base_url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("http_header_diff_blocked", result)
+        return result
+
+    if paths is None:
+        paths = ["/", "/robots.txt", "/sitemap.xml"]
+
+    max_paths = max(1, min(int(max_paths), 100))
+    paths = list(paths)[:max_paths]
+
+    base = urlparse(base_url)
+    base_origin = (
+        f"{base.scheme}://{base.hostname}:{base.port}"
+        if base.port
+        else f"{base.scheme}://{base.hostname}"
+    )
+
+    responses = []
+    blocked_paths = []
+
+    for raw_path in paths:
+        raw_path = str(raw_path).strip() or "/"
+
+        # Treat caller-provided absolute URLs and relative paths uniformly.
+        candidate_url = urljoin(base_url, raw_path)
+        candidate_validation = validate_local_url(candidate_url)
+        parsed = urlparse(candidate_url)
+        candidate_origin = (
+            f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+            if parsed.port
+            else f"{parsed.scheme}://{parsed.hostname}"
+        )
+
+        if not candidate_validation["ok"]:
+            blocked_paths.append({
+                "path": raw_path,
+                "url": candidate_url,
+                "reason": "blocked by local-only URL policy",
+            })
+            continue
+
+        if candidate_origin != base_origin:
+            blocked_paths.append({
+                "path": raw_path,
+                "url": candidate_url,
+                "reason": "blocked: different origin",
+            })
+            continue
+
+        head = _http_probe(candidate_url, method="HEAD", max_bytes=0)
+        headers = head.get("headers") or {}
+        normalized_headers = {str(k).lower(): str(v) for k, v in headers.items()}
+
+        responses.append({
+            "path": parsed.path or "/",
+            "query": parsed.query,
+            "url": candidate_url,
+            "ok": bool(head.get("ok")),
+            "status": head.get("status"),
+            "headers": headers,
+            "normalized_headers": normalized_headers,
+        })
+
+    all_header_names = sorted({
+        name
+        for response in responses
+        for name in response.get("normalized_headers", {}).keys()
+    })
+
+    common_headers = {}
+    varying_headers = {}
+    missing_headers = {}
+
+    for name in all_header_names:
+        values = {}
+        missing = []
+
+        for response in responses:
+            path = response["path"]
+            headers = response.get("normalized_headers", {})
+
+            if name in headers:
+                values[path] = headers[name]
+            else:
+                missing.append(path)
+
+        unique_values = sorted(set(values.values()))
+
+        if len(unique_values) == 1 and not missing:
+            common_headers[name] = unique_values[0]
+        else:
+            varying_headers[name] = values
+            if missing:
+                missing_headers[name] = missing
+
+    result = {
+        "ok": True,
+        "mode": "passive_head_only_header_diff",
+        "base_url": base_url,
+        "url_validation": validation,
+        "requested_path_count": len(paths),
+        "response_count": len(responses),
+        "blocked_path_count": len(blocked_paths),
+        "responses": [
+            {
+                "path": r["path"],
+                "query": r["query"],
+                "url": r["url"],
+                "ok": r["ok"],
+                "status": r["status"],
+                "headers": r["headers"],
+            }
+            for r in responses
+        ],
+        "common_headers": common_headers,
+        "varying_headers": varying_headers,
+        "missing_headers": missing_headers,
+        "blocked_paths": blocked_paths,
+        "notes": [
+            "HEAD requests only",
+            "same-origin localhost-only paths only",
+            "no crawling",
+            "no fuzzing",
+            "no exploitation",
+            "no authentication attempted",
+            "no form submission",
+        ],
+    }
+
+    audit_event("http_header_diff", {
+        "ok": True,
+        "base_url": base_url,
+        "requested_path_count": len(paths),
+        "response_count": len(responses),
+        "blocked_path_count": len(blocked_paths),
+        "varying_header_count": len(varying_headers),
+    })
+
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()
