@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+URL="${1:-http://127.0.0.1:3000}"
+APPROVAL="${2:-}"
+
+python - "$URL" "$APPROVAL" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+url = sys.argv[1]
+approval = sys.argv[2]
+
+policy_path = Path("lab/policies/bounded_fuzzing_policy.json")
+controls_path = Path("lab/policies/active_controls.json")
+
+policy = json.loads(policy_path.read_text())
+controls = json.loads(controls_path.read_text()) if controls_path.exists() else {}
+
+mcp_path = Path("mcp/openmythos_0ai_mcp.py")
+spec = importlib.util.spec_from_file_location("openmythos_mcp", mcp_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+validation = mod.validate_local_url(url)
+
+allowed_classes = set(policy.get("allowed_payload_classes", []))
+prohibited_classes = set(policy.get("prohibited_payload_classes", []))
+
+benign_candidates = [
+    {
+        "class": "benign_empty_value",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "",
+        "purpose": "empty value handling check",
+    },
+    {
+        "class": "benign_ascii_boundary_values",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "A",
+        "purpose": "minimal ASCII value handling check",
+    },
+    {
+        "class": "benign_ascii_boundary_values",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "A" * 32,
+        "purpose": "short benign ASCII length check",
+    },
+    {
+        "class": "benign_length_variation",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "B" * 128,
+        "purpose": "bounded benign length variation",
+    },
+    {
+        "class": "benign_numeric_boundary_values",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "0",
+        "purpose": "zero numeric boundary check",
+    },
+    {
+        "class": "benign_numeric_boundary_values",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "1",
+        "purpose": "small positive numeric boundary check",
+    },
+    {
+        "class": "benign_numeric_boundary_values",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "999",
+        "purpose": "bounded positive numeric value check",
+    },
+    {
+        "class": "benign_unicode_smoke_value",
+        "location": "synthetic_query_parameter",
+        "parameter": "om_probe",
+        "value_preview": "test-✓",
+        "purpose": "benign unicode smoke check",
+    },
+]
+
+# Only retain explicitly allowed benign classes.
+benign_candidates = [
+    item for item in benign_candidates
+    if item["class"] in allowed_classes and item["class"] not in prohibited_classes
+]
+
+max_requests = int(policy.get("max_requests_per_run", 10))
+max_requests = max(1, min(max_requests, 10))
+
+planned_cases = benign_candidates[:max_requests]
+
+parsed = urlparse(url)
+
+result = {
+    "ok": False,
+    "mode": "bounded_fuzzing_dry_run_only",
+    "executes_requests": False,
+    "execution_blocked": True,
+    "url": url,
+    "url_validation": validation,
+    "policy": {
+        "status": policy.get("status"),
+        "fuzzing_enabled": policy.get("fuzzing_enabled"),
+        "default_mode": policy.get("default_mode"),
+        "localhost_only": policy.get("localhost_only"),
+        "public_targets_allowed": policy.get("public_targets_allowed"),
+        "requires_kill_switch": policy.get("requires_kill_switch"),
+        "requires_explicit_approval": policy.get("requires_explicit_approval"),
+        "max_requests_per_run": policy.get("max_requests_per_run"),
+        "max_request_rate_per_second": policy.get("max_request_rate_per_second"),
+        "timeout_seconds": policy.get("timeout_seconds"),
+    },
+    "controls": {
+        "active_tools_enabled": controls.get("active_tools_enabled"),
+        "kill_switch_enabled": controls.get("kill_switch_enabled"),
+        "default_mode": controls.get("default_mode"),
+    },
+    "target": {
+        "scheme": parsed.scheme,
+        "hostname": parsed.hostname,
+        "port": parsed.port,
+        "path": parsed.path or "/",
+    },
+    "planned_case_count": len(planned_cases),
+    "planned_cases": [
+        {
+            **case,
+            "method": "GET",
+            "path": parsed.path or "/",
+            "executes": False,
+            "request_preview_only": True,
+        }
+        for case in planned_cases
+    ],
+    "blocked": False,
+    "reason": None,
+    "notes": [
+        "dry-run fuzz-case planner only",
+        "zero HTTP requests executed",
+        "localhost-only URL policy enforced",
+        "benign candidate classes only",
+        "no SQL injection payloads",
+        "no XSS payloads",
+        "no command injection payloads",
+        "no shell metacharacter payloads",
+        "no exploit payloads",
+        "no login attempts",
+        "no broad crawling",
+        "no public target support",
+    ],
+}
+
+if not validation.get("ok"):
+    result["blocked"] = True
+    result["reason"] = "blocked by local-only URL policy"
+elif approval != policy.get("approval_phrase"):
+    result["blocked"] = True
+    result["reason"] = "missing explicit bounded fuzzing approval phrase"
+    result["required_approval"] = policy.get("approval_phrase")
+elif policy.get("fuzzing_enabled") is not False:
+    result["blocked"] = True
+    result["reason"] = "unexpected fuzzing_enabled value"
+elif policy.get("default_mode") != "dry_run":
+    result["blocked"] = True
+    result["reason"] = "bounded fuzzing policy default mode is not dry_run"
+elif policy.get("public_targets_allowed") is not False:
+    result["blocked"] = True
+    result["reason"] = "public target support must remain disabled"
+elif controls.get("kill_switch_enabled") is not True:
+    result["blocked"] = True
+    result["reason"] = "kill switch must remain enabled for this dry-run milestone"
+else:
+    result["ok"] = True
+    result["blocked"] = False
+    result["reason"] = "bounded fuzzing dry-run plan generated; zero requests executed"
+
+mod.audit_event("bounded_fuzz_dry_run_plan", {
+    "ok": result["ok"],
+    "url": url,
+    "blocked": result["blocked"],
+    "execution_blocked": result["execution_blocked"],
+    "planned_case_count": result["planned_case_count"],
+    "reason": result["reason"],
+})
+
+print(json.dumps(result, indent=2, sort_keys=True))
+PY
