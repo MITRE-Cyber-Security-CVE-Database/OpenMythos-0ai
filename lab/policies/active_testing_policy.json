@@ -1,0 +1,49 @@
+{
+  "name": "OpenMythos active testing policy",
+  "version": "0.1.0",
+  "status": "policy_only_no_active_tools_enabled",
+  "allowed_targets": [
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "local Docker lab services",
+    "intentionally vulnerable local lab applications"
+  ],
+  "blocked": [
+    "public IP testing",
+    "third-party domains",
+    "external networks",
+    "credential stuffing",
+    "credential theft",
+    "persistence",
+    "evasion",
+    "malware deployment",
+    "destructive exploitation",
+    "data exfiltration",
+    "denial-of-service behavior"
+  ],
+  "disabled_capabilities": [
+    "fuzzing",
+    "login attempts",
+    "payload injection",
+    "exploit modules",
+    "broad crawling",
+    "public target support"
+  ],
+  "required_controls_before_active_tools": [
+    "localhost-only target validation",
+    "same-origin URL validation",
+    "explicit approval phrase per run",
+    "hard request cap",
+    "rate limit",
+    "timeout",
+    "kill switch",
+    "JSONL audit logging",
+    "dry-run mode",
+    "CI public-target block tests"
+  ],
+  "approval_phrases": {
+    "active_local_only": "I_APPROVE_ACTIVE_LOCAL_ONLY_TEST",
+    "bounded_local_only_fuzzing": "I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING"
+  }
+}
