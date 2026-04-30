@@ -1,0 +1,26 @@
+{
+  "name": "OpenMythos local-only pentest policy",
+  "version": "0.1.0",
+  "default_mode": "dry_run",
+  "network_tools_enabled": false,
+  "allowed_targets": [
+    "127.0.0.1",
+    "localhost",
+    "::1"
+  ],
+  "allowed_cidrs": [
+    "127.0.0.0/8"
+  ],
+  "blocked": [
+    "public IP scanning",
+    "third-party domains",
+    "credential attacks",
+    "persistence",
+    "evasion",
+    "malware deployment",
+    "destructive exploitation",
+    "data exfiltration"
+  ],
+  "requires_explicit_approval_for_active_scan": true,
+  "log_all_actions": true
+}
