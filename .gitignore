@@ -428,3 +428,7 @@ flycheck_*.el
 # network security
 /network-security.data
 
+
+# OpenMythos generated outputs
+artifacts/
+reports/

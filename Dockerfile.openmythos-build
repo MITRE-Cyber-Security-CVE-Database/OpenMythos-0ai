@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV OPENMYTHOS_DEVICE=cpu
+ENV OPENMYTHOS_THREADS=4
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir -U pip wheel setuptools build pytest
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+
+COPY . /app
+
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+RUN if [ -f pyproject.toml ] || [ -f setup.py ]; then pip install --no-cache-dir -e .; fi
+
+CMD ["python", "scripts/build_openmythos_model.py"]

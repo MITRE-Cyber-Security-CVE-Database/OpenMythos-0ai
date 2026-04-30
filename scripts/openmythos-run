@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$HOME/OpenMythos-0ai"
+source .venv/bin/activate
+
+case "${1:-smoke}" in
+  smoke)
+    python example.py
+    ;;
+  moda)
+    python examples/moda_example.py
+    ;;
+  variants)
+    python examples/variants_example.py
+    ;;
+  test)
+    pytest -q
+    ;;
+  info)
+    python - <<'PY'
+import inspect
+import torch
+import open_mythos
+import open_mythos.main as m
+
+print("[+] open_mythos loaded")
+print("[+] module:", m.__file__)
+print("[+] torch:", torch.__version__)
+print("[+] cuda available:", torch.cuda.is_available())
+print("[+] model classes:")
+for name in dir(m):
+    obj = getattr(m, name)
+    if inspect.isclass(obj) and "OpenMythos" in name:
+        print("   ", name, inspect.signature(obj))
+PY
+    ;;
+  *)
+    echo "Usage: $0 {smoke|moda|variants|test|info}"
+    exit 1
+    ;;
+esac
