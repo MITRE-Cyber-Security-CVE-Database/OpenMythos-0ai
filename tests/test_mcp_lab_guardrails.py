@@ -50,3 +50,21 @@ def test_public_report_generation_blocked():
     )
     assert result["ok"] is False
     assert result["blocked"] is True
+
+
+def test_static_asset_inventory_requires_approval():
+    mod = load_mcp()
+    result = mod.openmythos_http_static_asset_inventory("http://127.0.0.1:3000")
+    assert result["ok"] is False
+    assert result["blocked"] is True
+    assert result["required_approval"] == "I_APPROVE_LOCAL_ONLY_HTTP_GET"
+
+
+def test_static_asset_inventory_blocks_public_url():
+    mod = load_mcp()
+    result = mod.openmythos_http_static_asset_inventory(
+        "http://example.com",
+        approval="I_APPROVE_LOCAL_ONLY_HTTP_GET",
+    )
+    assert result["ok"] is False
+    assert result["blocked"] is True

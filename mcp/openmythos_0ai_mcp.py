@@ -1301,5 +1301,164 @@ def openmythos_fetch_sitemap_xml(
     return result
 
 
+STATIC_ASSET_EXTENSIONS = {
+    ".css", ".js", ".mjs",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
+    ".woff", ".woff2", ".ttf", ".otf",
+    ".map",
+    ".json",
+}
+
+
+def _looks_like_static_asset(path: str) -> bool:
+    lower = str(path or "").lower()
+    return any(lower.endswith(ext) for ext in STATIC_ASSET_EXTENSIONS)
+
+
+@mcp.tool()
+def openmythos_http_static_asset_inventory(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+    max_assets: int = 100,
+) -> Dict[str, Any]:
+    # Passive static asset inventory for an allowed localhost-only URL.
+    # Uses single-page route discovery plus HEAD requests on same-origin assets.
+    # No crawling, fuzzing, JavaScript execution, exploitation, auth, or mutation.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("static_asset_inventory_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("static_asset_inventory_missing_approval", result)
+        return result
+
+    max_assets = max(1, min(int(max_assets), 500))
+
+    routes = openmythos_http_route_discovery(
+        url=url,
+        approval=approval,
+        max_bytes=65536,
+        max_routes=max_assets * 2,
+    )
+
+    if not routes.get("ok"):
+        result = {
+            "ok": False,
+            "url": url,
+            "url_validation": validation,
+            "route_discovery": routes,
+            "reason": "route discovery failed",
+        }
+        audit_event("static_asset_inventory_route_discovery_failed", {
+            "ok": False,
+            "url": url,
+        })
+        return result
+
+    assets = []
+    skipped = []
+    seen = set()
+
+    for route in routes.get("same_origin_routes") or []:
+        asset_url = route.get("url")
+        asset_path = route.get("path") or ""
+
+        if not asset_url:
+            continue
+
+        if asset_url in seen:
+            continue
+
+        seen.add(asset_url)
+
+        if not _looks_like_static_asset(asset_path):
+            skipped.append({
+                "url": asset_url,
+                "path": asset_path,
+                "reason": "not recognized as static asset extension",
+            })
+            continue
+
+        asset_validation = validate_local_url(asset_url)
+        if not asset_validation["ok"]:
+            skipped.append({
+                "url": asset_url,
+                "path": asset_path,
+                "reason": "blocked by local-only URL policy",
+            })
+            continue
+
+        head = _http_probe(asset_url, method="HEAD", max_bytes=0)
+
+        assets.append({
+            "url": asset_url,
+            "path": asset_path,
+            "source_attr": route.get("attr"),
+            "source_tag": route.get("tag"),
+            "status": head.get("status"),
+            "ok": bool(head.get("ok")),
+            "content_type": (head.get("headers") or {}).get("Content-Type"),
+            "content_length": (head.get("headers") or {}).get("Content-Length"),
+            "cache_control": (head.get("headers") or {}).get("Cache-Control"),
+            "etag": (head.get("headers") or {}).get("ETag"),
+        })
+
+        if len(assets) >= max_assets:
+            break
+
+    by_type = {}
+    for asset in assets:
+        ctype = asset.get("content_type") or "unknown"
+        by_type[ctype] = by_type.get(ctype, 0) + 1
+
+    result = {
+        "ok": True,
+        "mode": "passive_static_asset_inventory",
+        "url": url,
+        "url_validation": validation,
+        "asset_count": len(assets),
+        "skipped_count": len(skipped),
+        "assets": assets,
+        "skipped": skipped[:100],
+        "content_type_counts": by_type,
+        "notes": [
+            "single-page route discovery only",
+            "same-origin static assets only",
+            "HEAD requests only for asset metadata",
+            "localhost-only URL policy enforced",
+            "no crawling",
+            "no fuzzing",
+            "no JavaScript execution",
+            "no exploitation",
+            "no authentication attempted",
+            "no form submission",
+        ],
+    }
+
+    audit_event("static_asset_inventory", {
+        "ok": True,
+        "url": url,
+        "asset_count": len(assets),
+        "skipped_count": len(skipped),
+        "content_type_counts": by_type,
+    })
+
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()
