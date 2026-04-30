@@ -4,6 +4,27 @@ import json
 import time
 import pathlib
 import subprocess
+import re
+
+REDACT_PATTERNS = [
+    re.compile(r"(?i)(token|secret|password|passwd|api[_-]?key|authorization)[=:]\S+"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+]
+
+def redact(text: str) -> str:
+    for pat in REDACT_PATTERNS:
+        text = pat.sub("[REDACTED]", text)
+    return text
+
+
+def assert_repo_safe() -> None:
+    if not REPO.exists():
+        raise RuntimeError(f"Repo does not exist: {REPO}")
+    expected = pathlib.Path.home().resolve() / "OpenMythos-0ai"
+    if REPO != expected:
+        raise RuntimeError(f"Unsafe OPENMYTHOS_REPO override: {REPO}")
+
 from typing import Dict, Any, List
 
 from fastmcp import FastMCP
@@ -17,8 +38,10 @@ TIMEOUT = int(os.environ.get("OPENMYTHOS_TIMEOUT", "90"))
 
 def run_cmd(args: List[str], timeout: int = TIMEOUT) -> Dict[str, Any]:
     """
-    Safe command runner: no shell=True.
+    Safe command runner: no shell=True, fixed argv only, repo-bound.
     """
+    assert_repo_safe()
+
     start = time.time()
     try:
         proc = subprocess.run(
@@ -32,21 +55,24 @@ def run_cmd(args: List[str], timeout: int = TIMEOUT) -> Dict[str, Any]:
             "ok": proc.returncode == 0,
             "returncode": proc.returncode,
             "elapsed_seconds": round(time.time() - start, 3),
-            "stdout": proc.stdout[-12000:],
-            "stderr": proc.stderr[-12000:],
+            "stdout": redact(proc.stdout[-12000:]),
+            "stderr": redact(proc.stderr[-12000:]),
             "cwd": str(REPO),
             "cmd": args,
         }
     except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
         return {
             "ok": False,
             "error": "timeout",
             "timeout_seconds": timeout,
-            "stdout": (exc.stdout or "")[-12000:] if isinstance(exc.stdout, str) else "",
-            "stderr": (exc.stderr or "")[-12000:] if isinstance(exc.stderr, str) else "",
+            "stdout": redact(stdout[-12000:] if isinstance(stdout, str) else ""),
+            "stderr": redact(stderr[-12000:] if isinstance(stderr, str) else ""),
             "cwd": str(REPO),
             "cmd": args,
         }
+
 
 
 @mcp.tool()
@@ -220,6 +246,31 @@ print({
 raise SystemExit(1)
 '''
     return run_cmd([PYTHON, "-c", code], timeout=180)
+
+
+
+@mcp.tool()
+def openmythos_safety_policy() -> Dict[str, Any]:
+    """
+    Return the current safety posture for OpenMythos MCP.
+    """
+    return {
+        "network_tools_enabled": False,
+        "shell_enabled": False,
+        "public_target_scanning_enabled": False,
+        "allowed_targets": ["127.0.0.1", "localhost", "local Docker labs only"],
+        "blocked": [
+            "public IP scanning",
+            "third-party domains",
+            "credential attacks",
+            "persistence",
+            "evasion",
+            "malware deployment",
+            "destructive exploitation",
+            "data exfiltration",
+        ],
+        "status": "repo/test/model smoke MCP only",
+    }
 
 
 if __name__ == "__main__":
