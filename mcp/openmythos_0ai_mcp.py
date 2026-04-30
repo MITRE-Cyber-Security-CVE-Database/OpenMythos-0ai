@@ -28,7 +28,8 @@ def assert_repo_safe() -> None:
 
 from typing import Dict, Any, List
 from datetime import datetime, timezone
-from urllib.parse import urlparse
+from html.parser import HTMLParser
+from urllib.parse import urlparse, urljoin
 import urllib.request
 import urllib.error
 
@@ -719,6 +720,182 @@ def openmythos_http_fingerprint(
         "title": title,
         "indicators": indicators,
         "body_preview_bytes": result["body_preview_bytes"],
+    })
+
+    return result
+
+
+class _OpenMythosRouteParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.refs = []
+
+    def handle_starttag(self, tag, attrs):
+        for key, value in attrs:
+            if key and value and key.lower() in {"href", "src", "action"}:
+                self.refs.append({
+                    "tag": tag.lower(),
+                    "attr": key.lower(),
+                    "raw": str(value).strip(),
+                })
+
+
+@mcp.tool()
+def openmythos_http_route_discovery(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+    max_bytes: int = 32768,
+    max_routes: int = 200,
+) -> Dict[str, Any]:
+    # Passive single-page route discovery.
+    # No crawling, fuzzing, form submission, auth, JS execution, or mutation.
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("http_route_discovery_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("http_route_discovery_missing_approval", result)
+        return result
+
+    max_bytes = max(1024, min(int(max_bytes), 131072))
+    max_routes = max(1, min(int(max_routes), 1000))
+
+    get = _http_probe(url=url, method="GET", max_bytes=max_bytes)
+    if not get.get("ok"):
+        result = {
+            "ok": False,
+            "url": url,
+            "url_validation": validation,
+            "fetch": get,
+            "reason": "GET probe failed",
+        }
+        audit_event("http_route_discovery_fetch_failed", {
+            "ok": False,
+            "url": url,
+            "status": get.get("status"),
+            "error": get.get("error"),
+        })
+        return result
+
+    body = get.get("body_preview", "") or ""
+
+    parser = _OpenMythosRouteParser()
+    parser.feed(body)
+    refs = parser.refs
+
+    base = urlparse(url)
+    base_origin = (
+        f"{base.scheme}://{base.hostname}:{base.port}"
+        if base.port
+        else f"{base.scheme}://{base.hostname}"
+    )
+
+    same_origin = []
+    blocked_refs = []
+    seen = set()
+
+    for ref in refs:
+        raw = ref["raw"]
+
+        if not raw or raw.startswith(("javascript:", "mailto:", "tel:", "data:")):
+            blocked_refs.append({
+                "tag": ref.get("tag"),
+                "attr": ref["attr"],
+                "raw": raw,
+                "reason": "non-http navigational reference ignored",
+            })
+            continue
+
+        absolute = urljoin(url, raw)
+        ref_validation = validate_local_url(absolute)
+
+        parsed = urlparse(absolute)
+        origin = (
+            f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
+            if parsed.port
+            else f"{parsed.scheme}://{parsed.hostname}"
+        )
+
+        if not ref_validation["ok"]:
+            blocked_refs.append({
+                "tag": ref.get("tag"),
+                "attr": ref["attr"],
+                "raw": raw,
+                "absolute": absolute,
+                "reason": "blocked by local-only URL policy",
+            })
+            continue
+
+        if origin != base_origin:
+            blocked_refs.append({
+                "tag": ref.get("tag"),
+                "attr": ref["attr"],
+                "raw": raw,
+                "absolute": absolute,
+                "reason": "blocked: allowed-local but different origin",
+            })
+            continue
+
+        normalized = {
+            "tag": ref.get("tag"),
+            "attr": ref["attr"],
+            "raw": raw,
+            "url": absolute,
+            "path": parsed.path or "/",
+            "query": parsed.query,
+        }
+
+        key = (normalized["url"], normalized["attr"])
+        if key in seen:
+            continue
+
+        seen.add(key)
+        same_origin.append(normalized)
+
+        if len(same_origin) >= max_routes:
+            break
+
+    result = {
+        "ok": True,
+        "mode": "passive_single_page",
+        "url": url,
+        "url_validation": validation,
+        "status": get.get("status"),
+        "body_preview_bytes": get.get("body_preview_bytes"),
+        "same_origin_route_count": len(same_origin),
+        "blocked_reference_count": len(blocked_refs),
+        "same_origin_routes": same_origin,
+        "blocked_references": blocked_refs[:100],
+        "notes": [
+            "single-page parse only",
+            "no crawling",
+            "no fuzzing",
+            "no form submission",
+            "no JavaScript execution",
+            "localhost-only URL policy enforced",
+        ],
+    }
+
+    audit_event("http_route_discovery", {
+        "ok": True,
+        "url": url,
+        "same_origin_route_count": len(same_origin),
+        "blocked_reference_count": len(blocked_refs),
+        "body_preview_bytes": get.get("body_preview_bytes"),
     })
 
     return result
