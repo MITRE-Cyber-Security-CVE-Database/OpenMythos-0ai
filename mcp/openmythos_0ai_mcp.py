@@ -28,6 +28,7 @@ def assert_repo_safe() -> None:
 
 from typing import Dict, Any, List
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 from fastmcp import FastMCP
 
@@ -97,6 +98,52 @@ def validate_local_target(target: str) -> Dict[str, Any]:
         "ok": False,
         "target": target,
         "reason": "blocked: only localhost / loopback targets are allowed",
+    }
+
+
+def validate_local_url(url: str) -> Dict[str, Any]:
+    """
+    Permit only HTTP(S) URLs whose hostname resolves to the local-only policy.
+    """
+    url = str(url).strip()
+    parsed = urlparse(url)
+
+    if parsed.scheme not in {"http", "https"}:
+        return {
+            "ok": False,
+            "url": url,
+            "reason": "blocked: only http/https URLs are allowed",
+        }
+
+    if not parsed.hostname:
+        return {
+            "ok": False,
+            "url": url,
+            "reason": "blocked: URL has no hostname",
+        }
+
+    target_validation = validate_local_target(parsed.hostname)
+
+    if not target_validation["ok"]:
+        return {
+            "ok": False,
+            "url": url,
+            "scheme": parsed.scheme,
+            "hostname": parsed.hostname,
+            "port": parsed.port,
+            "target_validation": target_validation,
+            "reason": "blocked: URL hostname is outside local-only policy",
+        }
+
+    return {
+        "ok": True,
+        "url": url,
+        "scheme": parsed.scheme,
+        "hostname": parsed.hostname,
+        "port": parsed.port,
+        "path": parsed.path or "/",
+        "target_validation": target_validation,
+        "reason": "URL allowed by local-only policy",
     }
 
 
@@ -343,6 +390,16 @@ def openmythos_safety_policy() -> Dict[str, Any]:
         "status": "repo/test/model smoke MCP only",
     }
 
+
+
+@mcp.tool()
+def openmythos_validate_url(url: str) -> Dict[str, Any]:
+    """
+    Validate whether a URL is allowed under the local-only lab policy.
+    """
+    result = validate_local_url(url)
+    audit_event("validate_url", result)
+    return result
 
 
 @mcp.tool()
