@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+TS="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="lab/evidence/$TS"
+mkdir -p "$OUT"
+
+cp lab/reports/latest_lab_report.md "$OUT/" 2>/dev/null || true
+cp lab/reports/latest_lab_report.json "$OUT/" 2>/dev/null || true
+
+tail -n 200 lab_audit/logs/mcp_audit.jsonl > "$OUT/audit_log_tail.jsonl" 2>/dev/null || true
+
+{
+  echo "# Git State"
+  git log --oneline --decorate -12
+  echo
+  git status --short
+  echo
+  git tag --points-at HEAD
+} > "$OUT/git_state.txt"
+
+{
+  echo "# Docker State"
+  docker ps 2>/dev/null || sudo docker ps
+  echo
+  ss -ltnp | grep 3000 || true
+} > "$OUT/docker_state.txt"
+
+{
+  echo "# Scope"
+  echo "Allowed: 127.0.0.1, localhost, ::1, local Docker lab only"
+  echo "Blocked: public IPs, third-party domains, credential attacks, exploitation, fuzzing, crawling, form submission, auth attempts, data exfiltration"
+} > "$OUT/scope.txt"
+
+pytest -q | tee "$OUT/test_results.txt"
+
+echo "[+] Evidence bundle written to: $OUT"
