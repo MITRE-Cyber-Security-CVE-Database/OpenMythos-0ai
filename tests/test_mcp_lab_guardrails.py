@@ -40,3 +40,13 @@ def test_get_requires_approval():
     assert result["ok"] is False
     assert result["blocked"] is True
     assert result["required_approval"] == "I_APPROVE_LOCAL_ONLY_HTTP_GET"
+
+
+def test_public_report_generation_blocked():
+    mod = load_mcp()
+    result = mod.openmythos_generate_lab_report(
+        "http://example.com",
+        approval="I_APPROVE_LOCAL_ONLY_HTTP_GET",
+    )
+    assert result["ok"] is False
+    assert result["blocked"] is True
