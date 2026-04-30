@@ -629,5 +629,100 @@ def openmythos_http_get_preview(
     return _http_probe(url=url, method="GET", max_bytes=max_bytes)
 
 
+
+@mcp.tool()
+def openmythos_http_fingerprint(
+    url: str = "http://127.0.0.1:3000",
+    approval: str = "",
+) -> Dict[str, Any]:
+    """
+    Passive fingerprint of an allowed localhost-only HTTP app.
+
+    This performs:
+    - HEAD request
+    - approved bounded GET preview
+    - simple header/title/meta keyword extraction
+
+    It does not fuzz, exploit, brute force, submit forms, or mutate state.
+    """
+    validation = validate_local_url(url)
+    if not validation["ok"]:
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "blocked by local-only URL policy",
+        }
+        audit_event("http_fingerprint_blocked", result)
+        return result
+
+    if approval != "I_APPROVE_LOCAL_ONLY_HTTP_GET":
+        result = {
+            "ok": False,
+            "blocked": True,
+            "url_validation": validation,
+            "reason": "missing explicit approval phrase",
+            "required_approval": "I_APPROVE_LOCAL_ONLY_HTTP_GET",
+        }
+        audit_event("http_fingerprint_missing_approval", result)
+        return result
+
+    head = _http_probe(url=url, method="HEAD", max_bytes=0)
+    get = _http_probe(url=url, method="GET", max_bytes=4096)
+
+    body = get.get("body_preview", "") or ""
+    lower = body.lower()
+
+    title = None
+    if "<title>" in lower and "</title>" in lower:
+        start = lower.find("<title>")
+        end = lower.find("</title>", start)
+        if start >= 0 and end > start:
+            title = body[start + len("<title>"):end].strip()[:200]
+
+    indicators = []
+    checks = {
+        "owasp_juice_shop": ["owasp juice shop", "probably the most modern and sophisticated insecure web application"],
+        "angular": ["ng-version", "ng-app", "data-beasties-container"],
+        "express": ["x-powered-by: express"],
+        "security_headers_present": ["x-frame-options", "x-content-type-options"],
+        "cors_wildcard": ["access-control-allow-origin: *"],
+    }
+
+    header_text = "\\n".join(f"{k}: {v}" for k, v in (head.get("headers") or {}).items()).lower()
+    combined = header_text + "\\n" + lower
+
+    for name, needles in checks.items():
+        if any(n in combined for n in needles):
+            indicators.append(name)
+
+    result = {
+        "ok": bool(head.get("ok") or get.get("ok")),
+        "url": url,
+        "url_validation": validation,
+        "head_status": head.get("status"),
+        "get_status": get.get("status"),
+        "title": title,
+        "headers": head.get("headers", {}),
+        "indicators": indicators,
+        "body_preview_bytes": get.get("body_preview_bytes", 0),
+        "notes": [
+            "passive fingerprint only",
+            "localhost-only URL policy enforced",
+            "no fuzzing, exploitation, authentication, or form submission performed",
+        ],
+    }
+
+    audit_event("http_fingerprint", {
+        "ok": result["ok"],
+        "url": url,
+        "title": title,
+        "indicators": indicators,
+        "body_preview_bytes": result["body_preview_bytes"],
+    })
+
+    return result
+
+
 if __name__ == "__main__":
     mcp.run()
