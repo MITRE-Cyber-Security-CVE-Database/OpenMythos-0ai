@@ -1,0 +1,73 @@
+{
+  "name": "OpenMythos bounded fuzzing policy",
+  "version": "0.4.0-policy",
+  "status": "policy_only_no_fuzzing_execution_enabled",
+  "fuzzing_enabled": false,
+  "default_mode": "dry_run",
+  "localhost_only": true,
+  "public_targets_allowed": false,
+  "requires_kill_switch": true,
+  "requires_explicit_approval": true,
+  "approval_phrase": "I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING",
+  "max_requests_per_run": 10,
+  "max_request_rate_per_second": 1,
+  "timeout_seconds": 5,
+  "allowed_targets": [
+    "127.0.0.1",
+    "localhost",
+    "::1",
+    "explicit local Docker lab targets only"
+  ],
+  "allowed_payload_classes": [
+    "benign_length_variation",
+    "benign_ascii_boundary_values",
+    "benign_numeric_boundary_values",
+    "benign_empty_value",
+    "benign_unicode_smoke_value"
+  ],
+  "prohibited_payload_classes": [
+    "sql_injection",
+    "xss",
+    "command_injection",
+    "path_traversal",
+    "template_injection",
+    "deserialization_payloads",
+    "ssrf_payloads",
+    "xxe_payloads",
+    "shell_metacharacter_payloads",
+    "credential_payloads",
+    "auth_bypass_payloads",
+    "exploit_payloads",
+    "destructive_payloads"
+  ],
+  "prohibited_actions": [
+    "auth_login_attempts",
+    "credential_stuffing",
+    "session_hijacking",
+    "form_submission_without_explicit_local_lab_review",
+    "state_changing_requests",
+    "exploit_execution",
+    "broad_crawling",
+    "public_target_testing",
+    "data_exfiltration",
+    "denial_of_service"
+  ],
+  "required_controls_before_any_execution": [
+    "localhost-only URL validation",
+    "same-origin enforcement",
+    "explicit approval phrase",
+    "hard request cap",
+    "rate limit",
+    "timeout",
+    "kill switch enabled by default",
+    "dry-run-first planner",
+    "full JSONL audit logging",
+    "CI tests proving public targets are blocked",
+    "CI tests proving prohibited payload classes remain disabled"
+  ],
+  "notes": [
+    "This is a policy-only milestone.",
+    "No fuzzing execution is enabled by this policy.",
+    "The next implementation step may only be a dry-run fuzz planner that sends zero traffic."
+  ]
+}
