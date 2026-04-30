@@ -441,3 +441,6 @@ lab/evidence/
 
 # OpenMythos lab generated readiness reports
 lab/readiness/
+
+# OpenMythos lab generated release manifests
+lab/release/

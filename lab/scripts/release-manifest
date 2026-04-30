@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+
+mkdir -p lab/release
+
+python - <<'PY'
+import json
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+OUT_JSON = Path("lab/release/openmythos_lab_manifest.json")
+OUT_MD = Path("lab/release/openmythos_lab_manifest.md")
+
+def run(cmd):
+    return subprocess.check_output(cmd, text=True).strip()
+
+def maybe_read_json(path):
+    p = Path(path)
+    if not p.exists():
+        return None
+    return json.loads(p.read_text())
+
+commit = run(["git", "rev-parse", "HEAD"])
+short_commit = run(["git", "rev-parse", "--short", "HEAD"])
+tags_at_head = run(["git", "tag", "--points-at", "HEAD"]).splitlines()
+recent_log = run(["git", "log", "--oneline", "--decorate", "-20"]).splitlines()
+
+readiness = maybe_read_json("lab/readiness/latest_readiness.json")
+
+manifest = {
+    "ok": True,
+    "name": "OpenMythos Localhost Lab Release Manifest",
+    "mode": "documentation_and_readiness_manifest_only",
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "git": {
+        "commit": commit,
+        "short_commit": short_commit,
+        "tags_at_head": tags_at_head,
+        "recent_log": recent_log,
+    },
+    "passive_lab_milestones": [
+        "lab-localhost-v1.0 guardrail regression tests",
+        "lab-localhost-v1.1 CI",
+        "lab-localhost-v1.2 robots/sitemap passive fetch",
+        "lab-localhost-v1.3 static asset inventory",
+        "lab-localhost-v1.4 response header diff",
+        "lab-localhost-v1.5 JSON schema contracts",
+        "lab-localhost-v1.6 severity normalization"
+    ],
+    "active_lab_milestones": [
+        "active-lab-v0.1-final active testing policy",
+        "active-lab-v0.2-final caps and kill-switch baseline",
+        "active-lab-v0.3 active dry-run harness",
+        "active-lab-v0.3.1 enhanced dry-run safety reporting",
+        "active-lab-v0.4-policy-final bounded fuzzing policy only",
+        "active-lab-v0.4-dryrun bounded fuzzing dry-run planner",
+        "active-lab-v0.4-dryrun-report dry-run evidence workflow",
+        "active-lab-v0.4-readiness readiness checker"
+    ],
+    "readiness": readiness,
+    "safety_assertions": [
+        "localhost-only validation remains required",
+        "public target support remains disabled",
+        "active tools remain disabled",
+        "kill switch remains enabled",
+        "active dry-run executes zero requests",
+        "bounded fuzz dry-run executes zero requests",
+        "fuzzing remains disabled by policy",
+        "exploit payloads remain prohibited",
+        "login attempts remain prohibited",
+        "broad crawling remains prohibited",
+        "evidence and readiness outputs are generated locally and ignored by Git"
+    ],
+    "operator_commands": {
+        "start_lab": "sudo ./lab/scripts/labctl up",
+        "passive_audit": "./lab/scripts/passive-audit",
+        "active_dry_run": "./lab/scripts/active-dry-run http://127.0.0.1:3000 I_APPROVE_ACTIVE_LOCAL_ONLY_TEST",
+        "fuzz_dry_run": "./lab/scripts/fuzz-dry-run http://127.0.0.1:3000 I_APPROVE_BOUNDED_LOCAL_ONLY_FUZZING",
+        "dryrun_evidence_report": "./lab/scripts/dryrun-evidence-report http://127.0.0.1:3000",
+        "readiness_check": "./lab/scripts/readiness-check",
+        "stop_lab": "sudo ./lab/scripts/labctl down"
+    }
+}
+
+OUT_JSON.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+
+md = [
+    "# OpenMythos Localhost Lab Release Manifest",
+    "",
+    f"- Generated: `{manifest['generated_at']}`",
+    f"- Commit: `{short_commit}`",
+    f"- Mode: `{manifest['mode']}`",
+    f"- Tags at HEAD: `{', '.join(tags_at_head) if tags_at_head else 'none'}`",
+    "",
+    "## Safety Assertions",
+    "",
+]
+
+for item in manifest["safety_assertions"]:
+    md.append(f"- {item}")
+
+md.extend(["", "## Passive Lab Milestones", ""])
+for item in manifest["passive_lab_milestones"]:
+    md.append(f"- {item}")
+
+md.extend(["", "## Active Lab Milestones", ""])
+for item in manifest["active_lab_milestones"]:
+    md.append(f"- {item}")
+
+if readiness:
+    summary = readiness.get("summary", {})
+    md.extend([
+        "",
+        "## Latest Readiness",
+        "",
+        f"- OK: `{readiness.get('ok')}`",
+        f"- Passed: `{summary.get('passed')}`",
+        f"- Failed: `{summary.get('failed')}`",
+        f"- Total: `{summary.get('total')}`",
+    ])
+
+md.extend(["", "## Operator Commands", ""])
+for name, cmd in manifest["operator_commands"].items():
+    md.append(f"- `{name}`: `{cmd}`")
+
+md.extend(["", "## Recent Git Log", ""])
+for line in recent_log[:12]:
+    md.append(f"- `{line}`")
+
+OUT_MD.write_text("\n".join(md), encoding="utf-8")
+
+print(json.dumps({
+    "ok": True,
+    "json": str(OUT_JSON),
+    "markdown": str(OUT_MD),
+    "commit": short_commit,
+    "tags_at_head": tags_at_head,
+}, indent=2, sort_keys=True))
+PY
